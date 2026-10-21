@@ -33,8 +33,19 @@ public static class PersistenceExtensions
         }
     }
 
-    /// <summary>Uses the client rowVersion as the original value so the UPDATE is guarded by it (DB_NOTES §2.4).</summary>
+    /// <summary>
+    /// Optimistic concurrency for PUT (DB_NOTES §2.4): a stale client rowVersion is rejected immediately with 409
+    /// (even when the new values equal the stored ones and EF would issue no UPDATE); the client value is also used
+    /// as the original value so a concurrent change between load and save still fails the UPDATE.
+    /// </summary>
     public static void UseClientRowVersion<T>(this IApplicationDbContext db, T entity, byte[] rowVersion)
-        where T : class, IHasRowVersion =>
+        where T : class, IHasRowVersion
+    {
+        if (!entity.RowVersion.AsSpan().SequenceEqual(rowVersion))
+        {
+            throw new ConflictException(ErrorCodes.ConcurrencyConflict, ConcurrencyMessage);
+        }
+
         db.Entry(entity).Property(e => e.RowVersion).OriginalValue = rowVersion;
+    }
 }
