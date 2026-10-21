@@ -1,0 +1,18 @@
+# Build context for the API image is the repository root; keep it small.
+**/bin/
+**/obj/
+**/node_modules/
+**/logs/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/TestResults/
+.git/
+.env
+ui-vue/
+ui-nuxt/
+e2e/
+postman/
+tests/
+docs/
+artifacts-sql/
