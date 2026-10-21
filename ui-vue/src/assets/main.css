@@ -209,13 +209,32 @@ a {
   font-size: 0.9rem;
 }
 
-.w-full-input,
-.w-full-input .p-inputtext,
-.w-full-input .p-inputnumber,
-.w-full-input .p-select,
-.w-full-input .p-autocomplete,
-.w-full-input .p-datepicker {
+/* Form grids: inputs fill their column, and composite components fill their data-testid wrapper. */
+.p-fluid .p-inputtext,
+.p-fluid .p-textarea,
+.p-fluid .p-select,
+.p-fluid .p-inputnumber,
+.p-fluid .p-autocomplete,
+.p-fluid .p-datepicker,
+.filter-bar .p-select,
+.filter-bar .p-datepicker,
+.lines-table .p-select,
+.lines-table .p-inputnumber,
+.lines-table .p-autocomplete {
   width: 100%;
+}
+
+.p-fluid .p-inputnumber-input,
+.p-fluid .p-autocomplete-input,
+.p-fluid .p-datepicker-input,
+.lines-table .p-inputnumber-input,
+.lines-table .p-autocomplete-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.p-fluid .p-button:not(.p-button-icon-only) {
+  width: auto;
 }
 
 .lines-table {

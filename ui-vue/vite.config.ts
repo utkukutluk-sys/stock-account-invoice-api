@@ -20,6 +20,19 @@ export default defineConfig(({ mode }) => {
         resolvers: [PrimeVueResolver()],
       }),
     ],
+    // Pre-bundle every PrimeVue entry used by lazily loaded pages so the dev server never
+    // re-optimizes (and force-reloads) on the first visit of a route — keeps E2E on `vite dev` stable.
+    optimizeDeps: {
+      include: [
+        'vue', 'vue-router', 'pinia', 'axios', '@primeuix/themes', '@primeuix/themes/aura',
+        'primevue/config', 'primevue/toastservice', 'primevue/confirmationservice', 'primevue/usetoast', 'primevue/useconfirm',
+        'primevue/autocomplete', 'primevue/button', 'primevue/checkbox', 'primevue/column', 'primevue/confirmdialog',
+        'primevue/datatable', 'primevue/datepicker', 'primevue/dialog', 'primevue/iconfield', 'primevue/inputicon',
+        'primevue/inputnumber', 'primevue/inputtext', 'primevue/message', 'primevue/popover', 'primevue/select',
+        'primevue/skeleton', 'primevue/tab', 'primevue/tablist', 'primevue/tabpanel', 'primevue/tabpanels', 'primevue/tabs',
+        'primevue/tag', 'primevue/textarea', 'primevue/toast', 'primevue/toggleswitch', 'primevue/tooltip',
+      ],
+    },
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
