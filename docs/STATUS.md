@@ -24,17 +24,17 @@ Notes: record deviations from CONTRACT, `REQUEST → <agent>: ...` for cross-are
 | BE-9 | Startup migrate + seed + approve opening invoice | Backend | Done | Seed opening invoice approved via IInvoiceService → ALS000001, ELMA 100, S001 −18714.00 |
 | BE-10 | API Dockerfile, docker-compose.yml, .env.example | Backend | Done | docker compose build api OK; compose smoke (mssql+redis+api) passed Ahmet scenario; UI services not run by Backend |
 | BE-11 | README.md | Backend | Done | |
-| FE-1 | ui-vue scaffold, layout, types, http client + cache | Frontend | Not started | |
-| FE-2 | Login, auth store, guards, refresh, 403/404, profile | Frontend | Not started | |
-| FE-3 | Dashboard | Frontend | Not started | |
-| FE-4 | Stocks pages | Frontend | Not started | |
-| FE-5 | Current accounts pages | Frontend | Not started | |
-| FE-6 | Invoices pages (form, approve, cancel) | Frontend | Not started | |
-| FE-7 | Transactions pages | Frontend | Not started | |
-| FE-8 | Admin pages + company switcher | Frontend | Not started | |
-| FE-9 | Portal /my-account | Frontend | Not started | |
-| FE-10 | ui-nuxt port | Frontend | Not started | |
-| FE-11 | UI Dockerfiles | Frontend | Not started | |
+| FE-1 | ui-vue scaffold, layout, types, http client + cache | Frontend | Done | Vite 8 + PrimeVue 4.5 Aura; client cache w/ ETag, LRU, de-dup; 74 Vitest tests; see FRONTEND_NOTES.md |
+| FE-2 | Login, auth store, guards, refresh, 403/404, profile | Frontend | Done | in-memory token, single-flight refresh + 500 ms grace retry; X-Company-Id header for admin |
+| FE-3 | Dashboard | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-4 | Stocks pages | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-5 | Current accounts pages | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-6 | Invoices pages (form, approve, cancel) | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-7 | Transactions pages | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-8 | Admin pages + company switcher | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-9 | Portal /my-account | Frontend | Done | verified vs real API (smoke 16/16) |
+| FE-10 | ui-nuxt port | Frontend | Done | Nuxt 4.6 SSR; SSR refresh + Set-Cookie passthrough, Nitro /api proxy, useAsyncData+getCachedData; uses $fetch (not axios); smoke 16/16 vs real API |
+| FE-11 | UI Dockerfiles | Frontend | Done | ui-vue nginx (SPA fallback, /api → api:8080), ui-nuxt node runtime; NOT built: no Docker CLI on this machine |
 | TS-1 | Unit tests | Test | Not started | |
 | TS-2 | Integration tests | Test | Not started | |
 | TS-3 | Postman collection + newman | Test | Not started | |
