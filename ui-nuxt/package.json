@@ -1,0 +1,30 @@
+{
+  "name": "stockaccount-ui-nuxt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --port 3000",
+    "build": "nuxt build",
+    "preview": "node .output/server/index.mjs",
+    "postinstall": "nuxt prepare",
+    "type-check": "nuxt typecheck",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^1.0.3",
+    "@primeuix/themes": "^2.0.3",
+    "@primevue/nuxt-module": "^4.5.5",
+    "h3": "^1.15.11",
+    "nuxt": "^4.6.2",
+    "pinia": "^4.1.0",
+    "primeflex": "^4.0.0",
+    "primeicons": "^7.0.0",
+    "primevue": "^4.5.5"
+  },
+  "devDependencies": {
+    "typescript": "~5.9",
+    "vitest": "^5.0.5",
+    "vue-tsc": "^3.3.13"
+  }
+}
