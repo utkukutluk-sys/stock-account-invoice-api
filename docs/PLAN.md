@@ -40,7 +40,7 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 | ID | Task | Definition of done |
 |---|---|---|
 | BE-1 | Common: `PagedRequest`/`PagedResult<T>`, sort parser with per-entity whitelist, `ForTenant` extension, exception types, `GlobalExceptionHandler` → ProblemDetails with `code`, `traceId`, `correlationId`, validation `errors` (CONTRACT §5.1–5.2); FluentValidation registration + automatic validation (endpoint filter or explicit `ValidateAndThrowAsync` in services) | uniform error bodies |
-| BE-2 | Auth: Identity config, JWT issuing/validation, refresh tokens with rotation + reuse detection, `CurrentUser` implementation (incl. `X-Company-Id` for admin), policies `AdminOnly/Operator/Portal`, `AuthController` (CONTRACT §4, §5.4) | login/refresh/logout/me/change-password work |
+| BE-2 | Auth: Identity config, JWT issuing/validation, refresh tokens in the httpOnly `sa_refresh` cookie with rotation, reuse detection and a 30 s grace window (no refresh token in bodies), `UseForwardedHeaders`, `CurrentUser` implementation (incl. `X-Company-Id` for admin), policies `AdminOnly/Operator/Portal`, `AuthController` (CONTRACT §4, §5.4) | login/refresh/logout/me/change-password work |
 | BE-3 | Companies & Users services + controllers (§5.5, §5.6) | CRUD, rules, 409 codes |
 | BE-4 | `ICacheService` (Redis with in-memory fallback, versioned list keys, `X-Cache` header) + Stocks & CurrentAccounts services/controllers incl. transactions sub-resources (§5.7, §5.8, §6) | cached reads, invalidation on CUD |
 | BE-5 | Invoices: CRUD (Draft only), approve/cancel with transaction, numbering, negative-stock check, concurrency retry, ledger rows, balance update, cache invalidation (§3, §5.9) | Ahmet/Apple scenario passes manually via Swagger |
@@ -54,8 +54,8 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 ### Frontend agent
 | ID | Task | Definition of done |
 |---|---|---|
-| FE-1 | Scaffold `ui-vue` (Vite vue-ts), PrimeVue Aura + Turkish locale, PrimeFlex, primeicons, Pinia, router, layout (sidebar/topbar, responsive), TS DTO types, label/format utils, `http.ts` with auth interceptors + client cache (§10.1–10.3, §10.5) | `npm run build` and `vue-tsc` clean |
-| FE-2 | Login page, auth store, guards, single-flight refresh, logout, `/403`, 404, `/profile` | |
+| FE-1 | Scaffold `ui-vue` (Vite vue-ts), Vite dev proxy `/api` → 5080, PrimeVue Aura + Turkish locale, PrimeFlex, primeicons, Pinia, router, layout (sidebar/topbar, responsive), TS DTO types, label/format utils, `http.ts` (base `/api`, credentials) with auth interceptors + client cache (§8.1, §10.1–10.3, §10.5) | `npm run build` and `vue-tsc` clean |
+| FE-2 | Login page, in-memory auth store (no web storage), startup silent refresh via cookie, guards, single-flight refresh, logout, `/403`, 404, `/profile`; list filters synced to URL query | |
 | FE-3 | Dashboard | |
 | FE-4 | Stocks list + form + transactions tab | |
 | FE-5 | Current accounts list + form + transactions tab | |
@@ -63,8 +63,8 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 | FE-7 | Stock / account transactions pages | |
 | FE-8 | Admin: companies, users, reconciliation, company switcher | |
 | FE-9 | Portal `/my-account` | |
-| FE-10 | `ui-nuxt`: Nuxt 4 port (`ssr:false`), identical routes, texts, test ids, cache & auth behavior | E2E suite passes on both UIs |
-| FE-11 | `ui-vue/Dockerfile` (node build → nginx, SPA fallback `try_files ... /index.html`, build arg `VITE_API_BASE_URL`), `ui-nuxt/Dockerfile` (node build → node runtime, port 3000) | images build in compose |
+| FE-10 | `ui-nuxt`: Nuxt 4 port with **`ssr: true`**: `/api` proxy server route, SSR refresh with cookie forwarding + `Set-Cookie` pass-through, `useState` auth, `useAsyncData` + `getCachedData` data loading, rendering modes per CONTRACT §10.7, identical routes, texts and test ids | E2E suite (incl. #11 SSR) passes on both UIs |
+| FE-11 | `ui-vue/Dockerfile` (node build → nginx, SPA fallback `try_files ... /index.html`, `location /api/` proxy to `http://api:8080` with forwarded headers), `ui-nuxt/Dockerfile` (node build → node runtime, port 3000, env `NUXT_API_BASE`) | images build; both UIs work through compose |
 
 ### Test agent
 | ID | Task | Definition of done |
@@ -74,7 +74,7 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 | TS-3 | Postman collection + 2 environments + newman script (§11.3) | `npm test` in `postman/` green against running API |
 | TS-4 | Playwright E2E (§11.4) for ui-vue and ui-nuxt | both `test:vue` and `test:nuxt` green |
 | TS-5 | Docker smoke: `docker compose up --build -d`, wait for `/health`, run newman with docker env, open both UIs (Playwright against docker ports) | documented result in STATUS |
-| TS-6 | Walk the traceability checklist (§5) and mark each line verified; file defects as STATUS notes `BUG → <agent>: ...` | all lines verified |
+| TS-6 | Walk the traceability checklist (§6) and mark each line verified; file defects as STATUS notes `BUG → <agent>: ...` | all lines verified |
 
 ## 4. Definition of done (global)
 - `dotnet build` (0 errors) and `dotnet test` green; `npm run build` green for ui-vue and ui-nuxt; E2E green on both UIs; newman green.
@@ -83,7 +83,17 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 - Logs written to console and `logs/api-*.log`, with correlation id.
 - Every row in STATUS.md `Done`, deviations noted; traceability checklist fully checked.
 
-## 5. Requirement traceability checklist
+## 5. Open risks
+| Risk | Mitigation |
+|---|---|
+| Refresh-token rotation races: parallel tabs, or SSR and client refreshing at the same time | 30 s grace window without family revocation, plus a single client retry (CONTRACT §4.1, §10.2); covered by TS-2 #1 |
+| SameSite=Strict cookie is not sent on cross-site first navigation, so Nuxt SSR renders that request as anonymous | Client bootstrap refresh recovers the session (§10.7); this is accepted as a cosmetic redirect delay |
+| Refresh cookie uses `Path=/` instead of `/api/auth`, so it is also sent to page requests on the UI origin | Required for SSR; the cookie stays HttpOnly and SameSite=Strict and is accepted only by `/auth/refresh` and `/auth/logout` |
+| Package compatibility with .NET 10: Swashbuckle, EF tools and health-check packages | Use latest stable versions. If a package fails, record the deviation in STATUS. Fallback: Microsoft.AspNetCore.OpenApi + Swagger UI |
+| SQL Server container memory (≥ 2 GB) on the dev machine; Redis not running locally | Local dev uses SQLEXPRESS; the in-memory cache fallback is acceptable for dev |
+| Agents cannot talk to each other | Cross-area changes go through `REQUEST →` / `BUG →` notes in STATUS, triaged by the coordinator |
+
+## 6. Requirement traceability checklist
 | # | Assignment requirement | Satisfied by | Verified by |
 |---|---|---|---|
 | R1 | Web API providing Stock services | BE-4 (§5.7) | TS-2 #4, TS-3 |
@@ -95,7 +105,7 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 | R7 | Stock & Current Account cached in Redis | BE-4, §6 | TS-2 #7 |
 | R8 | Cache auto-refresh on CRUD (and balance changes) | §6 invalidation table (BE-4, BE-5) | TS-2 #7 |
 | R9 | User-friendly, optimized UI/UX | FE-1…9 (PrimeVue Aura, responsive, lazy tables, debounced filters, toasts, confirmations, inline validation, live totals) | TS-4 |
-| R10 | UI caches HTTP requests | §10.3 client cache + ETag/304 (BE-8) | TS-4 #10, TS-2 #8 |
+| R10 | UI caches HTTP requests | §10.3 client cache + ETag/304 (BE-8); Nuxt also caches through the `useAsyncData` payload and `getCachedData` (§10.7) | TS-4 #10, TS-2 #8 |
 | R11 | Admin controls base entities | Companies/Users AdminOnly; delete stock/account and cancel invoice AdminOnly (§4.2, §5) | TS-2 #2 |
 | R12 | Company = main entity, all assets belong to it | CompanyId on all tenant entities + isolation §3.8 (DB-2/4, BE-1) | TS-2 #3 |
 | R13 | Company can be a user | Users belong to a Company and act for it (Operator) §4.2 | TS-2 #3 |
@@ -114,6 +124,6 @@ If an agent needs a change in another agent's area, it records it in STATUS.md N
 | R26 | Postman testing | TS-3 | newman run |
 | R27 | Swagger | BE-8 | TS-6 manual |
 | R28 | Vue.js project | FE-1…9 (`ui-vue`) | TS-4 vue |
-| R29 | (Optional→required) migrate UI to Nuxt | FE-10 (`ui-nuxt`) | TS-4 nuxt |
+| R29 | (Optional→required) migrate UI to Nuxt | FE-10 (`ui-nuxt`, SSR) | TS-4 nuxt incl. #11 |
 | R30 | (Optional→required) Dockerize | BE-10, FE-11 | TS-5 |
 | R31 | Extra decided: Clean Architecture, EF migrations, JWT refresh, modular monolith + BackgroundService, ProblemDetails, FluentValidation, seed data, unit/integration/E2E tests | DB-*, BE-*, TS-* | TS-6 |

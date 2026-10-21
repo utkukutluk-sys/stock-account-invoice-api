@@ -1,4 +1,6 @@
-# StockAccountApp — Binding Contract (v1.0)
+# StockAccountApp — Binding Contract (v1.1)
+
+> v1.1 changes (coordinator decision; no entity/schema change): refresh token moved to an httpOnly cookie and the access token kept in memory only (§4.1, §5.4, §10.2); same-origin /api proxy for both UIs (§8); Nuxt runs with SSR (§10.7); tests updated (§11).
 
 This document is the **single source of truth** for all agents (Database, Backend, Frontend, Test).
 If code and contract disagree, the contract wins. Agents must not change this file; if something is
@@ -278,7 +280,13 @@ Approve and Cancel run in one DB transaction (`BeginTransactionAsync`, ReadCommi
 ### 4.1 Tokens
 - JWT HS256. `Jwt:Issuer`=`StockAccount`, `Jwt:Audience`=`StockAccount.Clients`, `Jwt:Key` ≥ 32 chars (config/env). ClockSkew 30 s.
 - Access token lifetime **15 min** (`Jwt:AccessTokenMinutes`), refresh token **7 days** (`Jwt:RefreshTokenDays`).
-- Refresh token = 64 random bytes, Base64Url; only SHA-256 hash stored. **Rotation**: each refresh revokes the used token (`ReplacedByTokenHash`) and issues a new one. Presenting a revoked token → revoke all active tokens of that user (reason "Reuse detected") and return 401 `INVALID_REFRESH_TOKEN`.
+- Refresh token = 64 random bytes, Base64Url; only SHA-256 hash stored. **Rotation**: each refresh revokes the used token (`ReplacedByTokenHash`) and issues a new one. Presenting a revoked token → revoke all active tokens of that user (reason "Reuse detected") and return 401 `INVALID_REFRESH_TOKEN`. **Grace window**: a token revoked *by rotation* less than 30 s ago (`Jwt:RefreshReuseGraceSeconds`, default 30) is not treated as reuse; the request gets 401 `INVALID_REFRESH_TOKEN` without revoking the family. This covers parallel tabs and an SSR+client race, where only one of the two concurrent refreshes wins. The UI handles it by retrying `/auth/refresh` once after 500 ms, because the browser will by then hold the winner's new cookie.
+- **Transport (binding):**
+  - The refresh token is **never** in a response body and never readable by JS. It is set as cookie `sa_refresh` (`Jwt:RefreshCookieName`): `HttpOnly`, `SameSite=Strict`, `Secure` when `Request.IsHttps`, `Path=/`, `Expires` = refresh expiry.
+  - Login and refresh set the cookie. Logout and failed refresh delete it.
+  - **Path deviation:** the cookie uses `Path=/` instead of `/api/auth`. Nuxt SSR must receive the cookie on page navigations like `GET /stocks` so it can refresh server-side, and a cookie scoped to `/api/auth` would never reach those requests. It stays HttpOnly and SameSite=Strict.
+  - The access token is held **in memory only** on the client: the Pinia store, or Nuxt `useState`, which is serialized into the SSR payload. It is never written to localStorage, sessionStorage, or a cookie.
+  - Requests carry it as `Authorization: Bearer`. JWT bearer stays the only API auth scheme, so there is no cookie-based API auth and no CSRF surface beyond `/auth/refresh` and `/auth/logout`. Those two are protected by SameSite=Strict and by accepting only `POST` with `Content-Type: application/json`.
 - Claims: `sub` (user id), `email`, `name` (FullName), `role` (`Admin`|`User`; map so `[Authorize(Roles=..)]` works — set `RoleClaimType = "role"`, `NameClaimType = "name"`, `MapInboundClaims = false`), `company_id` (if any), `account_id` (if linked), `jti`.
 - Identity options: password min 8, requires upper, lower, digit; non-alphanumeric not required. Lockout 5 failed attempts → 5 min. Unique email.
 
@@ -353,14 +361,14 @@ Application exceptions: `NotFoundException`, `ConflictException(code,msg)`, `Bus
 ### 5.4 Auth — `/api/auth`
 | Method | Route | Policy | Body | Response |
 |---|---|---|---|---|
-| POST | `/auth/login` | anonymous | `{ email, password }` | 200 `AuthResponse`; 401 `INVALID_CREDENTIALS`/`ACCOUNT_LOCKED`/`USER_INACTIVE`; 400 |
-| POST | `/auth/refresh` | anonymous | `{ refreshToken }` | 200 `AuthResponse`; 401 `INVALID_REFRESH_TOKEN` |
-| POST | `/auth/logout` | Authenticated | `{ refreshToken }` | 204 (revokes it; idempotent) |
+| POST | `/auth/login` | anonymous | `{ email, password }` | 200 `AuthResponse` + `Set-Cookie: sa_refresh`; 401 `INVALID_CREDENTIALS`/`ACCOUNT_LOCKED`/`USER_INACTIVE`; 400 |
+| POST | `/auth/refresh` | anonymous | `{}` (empty JSON). Token is read from the `sa_refresh` cookie | 200 `AuthResponse` + rotated `Set-Cookie`; 401 `INVALID_REFRESH_TOKEN` (missing/invalid/expired/reused cookie, which is then deleted) |
+| POST | `/auth/logout` | anonymous | `{}`. Revokes the token in the `sa_refresh` cookie if present and deletes the cookie | 204 (idempotent) |
 | GET | `/auth/me` | Authenticated | – | 200 `UserInfo` |
 | POST | `/auth/change-password` | Authenticated | `{ currentPassword, newPassword }` | 204; 400 |
 
 ```ts
-AuthResponse { accessToken: string; accessTokenExpiresAt: string; refreshToken: string; refreshTokenExpiresAt: string; user: UserInfo }
+AuthResponse { accessToken: string; accessTokenExpiresAt: string; user: UserInfo }   // no refresh token in body
 UserInfo { id: number; email: string; fullName: string; role: "Admin"|"User"; companyId: number|null; companyName: string|null; currentAccountId: number|null; currentAccountTitle: string|null; isPortalUser: boolean }
 ```
 
@@ -514,7 +522,7 @@ Invoice draft CRUD does not touch balances → no stock/account invalidation. In
     "Default": "Server=.\\SQLEXPRESS;Database=StockAccountDb;Trusted_Connection=True;TrustServerCertificate=True;MultipleActiveResultSets=False",
     "Redis": "localhost:6379,abortConnect=false,connectTimeout=2000"
   },
-  "Jwt": { "Issuer": "StockAccount", "Audience": "StockAccount.Clients", "Key": "DEV-ONLY-change-me-0123456789-abcdefghijklmnop", "AccessTokenMinutes": 15, "RefreshTokenDays": 7 },
+  "Jwt": { "Issuer": "StockAccount", "Audience": "StockAccount.Clients", "Key": "DEV-ONLY-change-me-0123456789-abcdefghijklmnop", "AccessTokenMinutes": 15, "RefreshTokenDays": 7, "RefreshCookieName": "sa_refresh", "RefreshReuseGraceSeconds": 30 },
   "Cache": { "Enabled": true, "UseRedis": true, "EntityTtlMinutes": 10, "ListTtlMinutes": 5 },
   "Inventory": { "AllowNegativeStock": false },
   "Reconciliation": { "Enabled": true, "IntervalMinutes": 5, "AutoFix": false },
@@ -523,19 +531,26 @@ Invoice draft CRUD does not touch balances → no stock/account invalidation. In
   "Serilog": { "...": "see section 7" }
 }
 ```
-CORS: allowed origins from config, any header/method, expose headers `X-Correlation-Id, X-Cache, ETag, Location`.
+**Same-origin model:** browsers never call the API cross-origin. Both UIs call the relative path `/api/...` on their own origin, and the UI host proxies it to the API:
+- ui-vue dev uses the Vite `server.proxy` `{ '/api': { target: 'http://localhost:5080', changeOrigin: true } }`.
+- ui-vue Docker uses nginx `location /api/ { proxy_pass http://api:8080; proxy_set_header Host $host; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; }`.
+- ui-nuxt (dev and prod) uses the Nitro server route `server/routes/api/[...path].ts` → `proxyRequest(event, runtimeConfig.apiBase + event.path)`. This is runtime-configurable via `NUXT_API_BASE`. `routeRules` proxy is build-time only and therefore not used.
+
+Cookies (`sa_refresh`) are thus first-party on the UI origin. The API calls `UseForwardedHeaders` (X-Forwarded-For/Proto) so `IsHttps` and client IP are correct behind proxies.
+
+CORS remains configured only for dev tooling: direct calls from other local tools, and a UI dev server run without proxy. Allowed origins come from config, with any header/method, `AllowCredentials()`, and exposed headers `X-Correlation-Id, X-Cache, ETag, Location`. Swagger UI is served by the API itself, so it is same-origin and needs no CORS.
 
 ### 8.2 Ports
 | Component | Local dev | Docker (host:container) |
 |---|---|---|
 | API | http://localhost:5080 (launchSettings, http only) | 5080:8080 |
-| ui-vue | http://localhost:5173 (vite) | 5173:80 (nginx static) |
-| ui-nuxt | http://localhost:3000 (nuxt dev) | 3000:3000 (node `.output/server/index.mjs`) |
+| ui-vue | http://localhost:5173 (vite, proxies /api → 5080) | 5173:80 (nginx static + /api proxy → api:8080) |
+| ui-nuxt | http://localhost:3000 (nuxt dev, SSR, proxies /api → 5080) | 3000:3000 (node `.output/server/index.mjs`, SSR, proxies /api → api:8080) |
 | SQL Server | `.\SQLEXPRESS` | 14333:1433 (avoid clash with local SQL) |
 | Redis | localhost:6379 (run `docker run -d --name sa-redis -p 6379:6379 redis:7-alpine`, optional) | 6379:6379 |
 
 ### 8.3 Docker compose (`docker-compose.yml` at root; `.env` from `.env.example`)
-Services: `mssql` (`mcr.microsoft.com/mssql/server:2022-latest`, `ACCEPT_EULA=Y`, `MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD}`, healthcheck via `/opt/mssql-tools18/bin/sqlcmd -C ... -Q "SELECT 1"`, volume `mssql-data`), `redis` (`redis:7-alpine`, healthcheck `redis-cli ping`), `api` (build `src/StockAccount.Api/Dockerfile` with context root; depends_on healthy mssql+redis), `ui-vue` (build `ui-vue/`, build arg `VITE_API_BASE_URL=http://localhost:5080/api`), `ui-nuxt` (build `ui-nuxt/`, env `NUXT_PUBLIC_API_BASE=http://localhost:5080/api`).
+Services: `mssql` (`mcr.microsoft.com/mssql/server:2022-latest`, `ACCEPT_EULA=Y`, `MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD}`, healthcheck via `/opt/mssql-tools18/bin/sqlcmd -C ... -Q "SELECT 1"`, volume `mssql-data`), `redis` (`redis:7-alpine`, healthcheck `redis-cli ping`), `api` (build `src/StockAccount.Api/Dockerfile` with context root; depends_on healthy mssql+redis), `ui-vue` (build `ui-vue/`; nginx proxies `/api/` to `http://api:8080`; depends_on api), `ui-nuxt` (build `ui-nuxt/`, env `NUXT_API_BASE=http://api:8080`; depends_on api).
 API env in compose:
 ```
 ASPNETCORE_ENVIRONMENT=Docker
@@ -550,8 +565,8 @@ Database__Seed=true
 API startup with MigrateOnStartup must retry DB connection (EnableRetryOnFailure + up to 10 attempts × 5 s for the initial migrate).
 
 ### 8.4 Frontend env
-- ui-vue: `VITE_API_BASE_URL` (default `http://localhost:5080/api`) in `.env.development`.
-- ui-nuxt: `runtimeConfig.public.apiBase` (env `NUXT_PUBLIC_API_BASE`, default `http://localhost:5080/api`).
+- ui-vue: the browser always uses base `/api`; no API URL env. Proxy target for dev is in `vite.config.ts`, overridable via env `VITE_PROXY_TARGET` (default `http://localhost:5080`).
+- ui-nuxt: the browser always uses `/api`. Server-side, `runtimeConfig.apiBase` (private, env `NUXT_API_BASE`, default `http://localhost:5080`, without `/api`) is used by both the proxy route and SSR data fetching. SSR calls the API directly at `apiBase + '/api/...'`.
 
 ---
 
@@ -576,16 +591,37 @@ Seed is idempotent: check by unique keys (email, tax number, code) before insert
 ### 10.1 Stack & structure
 Vue 3 `<script setup lang="ts">`, PrimeVue 4 with **Aura** preset (`@primeuix/themes/aura`), PrimeFlex 4 utilities for layout, primeicons, Pinia, vue-router 4 (Nuxt: file-based pages with same paths). PrimeVue Turkish locale (day/month names, `firstDayOfWeek: 1`, `dateFormat: 'dd.mm.yy'`). Services: ToastService, ConfirmationService. Responsive: sidebar menu collapses into a top-bar toggle below 992px.
 ui-vue folders: `src/api/` (http client, cache, per-resource modules), `src/stores/` (auth, ui), `src/views/`, `src/components/`, `src/router/`, `src/types/` (TS mirrors of DTOs in section 5), `src/utils/format.ts`, `src/i18n/labels.ts`.
-Nuxt: `ssr: false` (SPA mode; tokens live in the browser), `@primevue/nuxt-module`, `@pinia/nuxt`, `middleware/auth.global.ts`, `plugins/api.ts`; same component code ported.
+Nuxt: **`ssr: true`**, `@primevue/nuxt-module`, `@pinia/nuxt`, `middleware/auth.global.ts`, `plugins/api.ts` (API client), `server/routes/api/[...path].ts` (proxy), and `server/utils/` for the SSR refresh. Same component code ported, see §10.7.
 
 ### 10.2 Auth flow
-- Login → store `accessToken`, `refreshToken`, `accessTokenExpiresAt`, `user` in Pinia, persisted to `localStorage` keys `sa.accessToken`, `sa.refreshToken`, `sa.accessTokenExpiresAt`, `sa.user`. Admin's selected company: `sa.companyId`.
-- Axios request interceptor adds `Authorization`, and `X-Company-Id` (admin, if selected). If the access token expires in < 60 s, refresh proactively first.
-- Response interceptor: on 401 (except `/auth/*`), perform **single-flight** refresh (concurrent 401s wait for the same promise), retry original once; refresh failure → clear storage + HTTP cache, redirect `/login?redirect=<path>`.
-- Logout: POST `/auth/logout`, clear storage and HTTP cache, go `/login`.
-- Route guard: meta `{ public?: true, policy?: 'operator'|'admin'|'portal' }`. Unauthenticated → `/login`. Policy mismatch → `/403`. After login: portal user → `/my-account`, others → `/` (or `redirect` query).
+**Token storage:**
+- After login or refresh, `accessToken`, `accessTokenExpiresAt` and `user` live **only in memory**: the Pinia auth store, which in Nuxt is backed by `useState` so the SSR payload hydrates it.
+- Nothing auth-related goes to localStorage or sessionStorage.
+- The refresh token is the httpOnly cookie `sa_refresh` (§4.1), which JS never sees. All API calls use `withCredentials`/`credentials: 'include'`, which is same-origin anyway.
 
-### 10.3 HTTP cache (client) — custom layer in `src/api/http.ts` (Nuxt: `utils/http.ts`)
+**Admin's selected company** is kept in the non-httpOnly cookie `sa_company` (`Path=/`, `SameSite=Strict`, 1 year) so SSR can read it too. Removing it means "Tüm Firmalar".
+
+**Bootstrap:** on app start or page reload, when there is no in-memory token, the UI silently calls `POST /api/auth/refresh` before the first guarded navigation resolves.
+- On success it fills the store.
+- On 401 it treats the visitor as anonymous: a guarded route redirects to `/login?redirect=<path>`.
+- If the 401 arrives within the grace window it retries once after 500 ms (§4.1).
+- In Nuxt, this step is skipped on the client when SSR already hydrated a token.
+
+**API client:**
+- The request interceptor adds `Authorization`, plus `X-Company-Id` from `sa_company` for admins.
+- If the access token expires in < 60 s, it refreshes proactively first.
+- On a 401 response (except `/auth/*`) it performs a **single-flight** refresh: concurrent 401s wait for the same promise, and the original request is retried once.
+- If the refresh fails, it clears the store and HTTP cache and redirects to `/login?redirect=<path>`.
+
+**Logout:** `POST /api/auth/logout` (the server deletes the cookie), clear the store, HTTP cache and `sa_company`, then go to `/login`.
+
+**Route guard:**
+- Meta is `{ public?: true, policy?: 'operator'|'admin'|'portal' }`.
+- Unauthenticated → `/login`. Policy mismatch → `/403`.
+- After login, a portal user goes to `/my-account` and everyone else to `/`, unless a `redirect` query is set.
+- A logged-in user visiting `/login` is redirected the same way.
+
+### 10.3 HTTP cache (client) — custom layer in `src/api/http.ts` (Nuxt: `utils/http.ts`, browser side only; on the server each SSR request starts with no cache)
 - Applies to `GET` only. Key = method + full URL with sorted query string + `X-Company-Id`.
 - Entry `{ data, etag, expiresAt }` in an in-memory `Map` (max 200 entries, LRU eviction).
 - Fresh (now < expiresAt) → return cached data without network. Stale with etag → send `If-None-Match`; on **304** reuse data and renew expiry (axios `validateStatus: s => (s >= 200 && s < 300) || s === 304`).
@@ -623,7 +659,7 @@ Nuxt: `ssr: false` (SPA mode; tokens live in the browser), `@primevue/nuxt-modul
 | `/profile` | any auth | Profilim (change password) | GET /auth/me, POST /auth/change-password |
 | `/403`, `/:pathMatch(.*)*` | public | Yetkisiz Erişim / Sayfa Bulunamadı | – |
 
-Admin top bar has a company switcher (Select, "Tüm Firmalar" + companies) setting `sa.companyId`. Creating a stock/account/invoice as admin with "Tüm Firmalar" selected shows warning "Lütfen önce firma seçiniz." and disables the "Yeni" buttons.
+Admin top bar has a company switcher (Select, "Tüm Firmalar" + companies) setting cookie `sa_company`. Creating a stock/account/invoice as admin with "Tüm Firmalar" selected shows warning "Lütfen önce firma seçiniz." and disables the "Yeni" buttons.
 
 List pages: PrimeVue DataTable `lazy` mode, server paging (rows options 10/20/50), server sort, filter bar above table (search InputText debounced 400 ms + per-entity Selects/DatePickers), paginator, loading skeleton, empty message "Kayıt bulunamadı.". Delete uses ConfirmDialog (header "Silme Onayı", accept "Evet", reject "Hayır"). Success → Toast severity success, summary "Başarılı"; API error → Toast severity error, summary "Hata", detail = ProblemDetails.detail (or first validation error). 400 validation errors are shown under the corresponding form fields.
 
@@ -653,6 +689,34 @@ Rule: `data-testid` goes on the native `<input>/<button>` where PrimeVue allows 
 | Confirm dialog | use role button names "Evet" / "Hayır" |
 | Toasts | rely on text "Başarılı" / "Hata" |
 
+### 10.7 Nuxt SSR specifics (ui-nuxt)
+- **SSR auth (`server/utils/ssrAuth.ts`, used by a server-only plugin `plugins/auth.server.ts`):**
+  - On each SSR page request that carries the `sa_refresh` cookie, the Nuxt server calls `POST {apiBase}/api/auth/refresh`, forwarding the cookie and `X-Forwarded-For`.
+  - It forwards the API's `Set-Cookie` (the rotated refresh cookie) to the browser response via `appendResponseHeader`.
+  - It puts `accessToken`, `accessTokenExpiresAt` and `user` into `useState('auth')`, which hydrates the client.
+  - The refresh runs once per SSR request, memoized on `event.context`.
+  - No cookie, or a 401 → anonymous SSR, and the guard redirects to `/login` with `navigateTo` (302).
+  - Because the cookie is SameSite=Strict, the browser omits it on a cross-site first navigation (e.g. a link from email). SSR then renders as anonymous, and the client bootstrap refresh (§10.2) recovers the session on the client, before redirecting.
+- **Data fetching:**
+  - Pages load data with `useAsyncData(key, () => api.get(...))`. The key = request URL + sorted query + company id, and is the same key the client cache uses.
+  - `api` is the shared client (`plugins/api.ts`, `$fetch.create`). On the server it targets `apiBase + '/api'` with the SSR access token and `X-Company-Id` from `sa_company`. In the browser it targets `/api` with the client cache of §10.3.
+  - SSR results travel in the Nuxt payload, so there is no refetch on hydration.
+  - `getCachedData(key, nuxtApp)` returns payload data first, then the client cache entry if still fresh. This satisfies the "UI caches HTTP requests" requirement on Nuxt in addition to §10.3.
+  - Mutations call `invalidate(prefixes)` (§10.3) and `refreshNuxtData(keys)` for affected keys on the current page.
+- **Rendering mode per page:**
+
+  | Page | Rendering |
+  |---|---|
+  | `/login`, `/403`, 404 | SSR (no data) |
+  | App shell (layout, menu by role, company switcher) | SSR |
+  | `/`, `/stocks`, `/current-accounts`, `/invoices`, `/stock-transactions`, `/account-transactions`, `/companies`, `/users`, `/my-account` | SSR incl. first page of data (page/sort/filters from the route query, e.g. `?page=2&q=EL`; list pages sync filters to the URL query) |
+  | `/stocks/:id`, `/current-accounts/:id`, `/invoices/:id`, `/profile` | SSR of the record. The "Hareketler" tab data loads client-side when the tab opens |
+  | `/stocks/new`, `/current-accounts/new`, `/invoices/new` | SSR form shell |
+  | `/reconciliation` | SSR shell; results come from a client-side POST |
+
+  These are client-only: AutoComplete suggestion requests, invoice line editing/live totals, Toast and ConfirmDialog.
+- ui-vue also syncs list filters to the URL query, so behavior is identical for E2E.
+
 ---
 
 ## 11. Test scope
@@ -667,7 +731,15 @@ Rule: `data-testid` goes on the native `<input>/<button>` where PrimeVue allows 
 ### 11.2 Integration tests (`tests/StockAccount.IntegrationTests`)
 `WebApplicationFactory<Program>` (`public partial class Program {}` required in Api). DB: SQL Server from env `TEST_SQL_CONNECTION`, default `Server=.\SQLEXPRESS;Database=StockAccountTests_{guid};Trusted_Connection=True;TrustServerCertificate=True`; database migrated + seeded per test run (collection fixture) and dropped at end. Cache: `Cache:UseRedis=false` (in-memory distributed cache). Reconciliation background service disabled (`Reconciliation:Enabled=false`).
 Scenarios:
-1. Auth: login ok/invalid (401 INVALID_CREDENTIALS), /auth/me, refresh rotation (old token rejected afterwards), reuse detection revokes new token too, logout, change password.
+1. Auth (client with cookie handling enabled):
+   - Login ok/invalid (401 INVALID_CREDENTIALS). The login body has no `refreshToken`. `Set-Cookie: sa_refresh` is present with `HttpOnly`, `SameSite=Strict` and `Path=/`.
+   - `/auth/me` works.
+   - Refresh via cookie rotates the cookie value.
+   - Replaying the old cookie after the grace window gives 401 and revokes the new token too. For this test, set `Jwt:RefreshReuseGraceSeconds=0`.
+   - Replaying within the grace window gives 401 without revoking the family.
+   - Refresh with no cookie gives 401.
+   - Logout deletes the cookie, and a refresh afterwards gives 401.
+   - Change password works.
 2. Authorization matrix: anonymous 401; operator → /companies 403, DELETE /stocks 403; portal (ahmet) → /stocks 403, /me/account 200; admin all.
 3. Tenant isolation: admin creates Company B + operator B; operator B gets 404 for Demo's stock id and sees only own lists; admin with X-Company-Id sees filtered lists; admin create without company → 400 COMPANY_REQUIRED.
 4. CRUD + validation for companies, users, stocks, current accounts, invoices (400 with `errors`, 409 DUPLICATE_CODE, 404).
@@ -683,7 +755,7 @@ Scenarios:
 14. Health endpoint 200; ProblemDetails contains `correlationId` and echoes `X-Correlation-Id`.
 
 ### 11.3 Postman (`postman/`)
-`StockAccount.postman_collection.json` (v2.1) with folders Auth, Companies, Users, Stocks, CurrentAccounts, Invoices, Transactions, Portal, Admin, **Scenario – Ahmet Elma** (ordered requests with `pm.test` assertions). Collection-level pre-request script logs in when `accessToken` empty/expired and stores tokens; requests use `{{baseUrl}}`, `{{accessToken}}`; ids captured into collection variables. Environments `StockAccount.local.postman_environment.json` (baseUrl `http://localhost:5080/api`) and `StockAccount.docker.postman_environment.json` (same URL). `postman/package.json` script `npm test` runs newman against local env. Swagger JSON also available at `/swagger/v1/swagger.json`.
+`StockAccount.postman_collection.json` (v2.1) with folders Auth, Companies, Users, Stocks, CurrentAccounts, Invoices, Transactions, Portal, Admin, **Scenario – Ahmet Elma** (ordered requests with `pm.test` assertions). Collection-level pre-request script logs in when `accessToken` empty/expired and stores the access token (the refresh cookie is kept by Postman's cookie jar; the Auth folder demonstrates refresh/logout via cookie); requests use `{{baseUrl}}`, `{{accessToken}}`; ids captured into collection variables. Environments `StockAccount.local.postman_environment.json` (baseUrl `http://localhost:5080/api`) and `StockAccount.docker.postman_environment.json` (same URL). `postman/package.json` script `npm test` runs newman against local env. Swagger JSON also available at `/swagger/v1/swagger.json`.
 
 ### 11.4 E2E (`e2e/`, Playwright, Chromium)
 `playwright.config.ts` baseURL from `E2E_BASE_URL` (default `http://localhost:5173`); npm scripts `test:vue` (5173) and `test:nuxt` (3000). Requires running API with seed data. Each test creates uniquely-coded data (`E2E{timestamp}`) to be re-runnable.
@@ -695,5 +767,12 @@ Scenarios:
 6. Portal: ahmet login → lands on `/my-account`, `my-balance` visible, `nav-stocks` absent; visiting `/stocks` → `/403`.
 7. Operator: `nav-companies` absent; `/companies` → `/403`.
 8. Paging/filter: stocks list with search "EL" shows ELMA row only; paginator changes page.
-9. Token refresh: after login, set `sa.accessToken` in localStorage to an invalid/expired token, reload `/stocks` → page loads (refresh succeeded).
-10. HTTP cache: visiting `/stocks` twice within TTL issues only one `GET /api/stocks` network request (count via `page.on('request')`); after creating a stock the list request is issued again.
+9. Session and token storage:
+   - After login, `localStorage` and `sessionStorage` contain no token.
+   - `context.cookies()` contains `sa_refresh` with `httpOnly: true`.
+   - A full page reload of `/stocks` stays logged in (silent refresh / SSR refresh).
+   - After `context.clearCookies()` and a reload, the user lands on `/login`.
+10. HTTP cache:
+    - Navigate client-side (via `nav-stocks`) Dashboard → Stocks → Dashboard → Stocks within the TTL. At most one browser `GET /api/stocks?...` is issued, counted via `page.on('request')`. On Nuxt it is 0 when the page came from SSR.
+    - After creating a stock, returning to the list issues the request again.
+11. (Nuxt only) SSR: `page.request.get('/stocks')` with the browser's cookies returns HTML already containing the `ELMA` row text. The `/login` HTML contains `login-email`.
