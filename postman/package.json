@@ -1,0 +1,13 @@
+{
+  "name": "stockaccount-postman",
+  "private": true,
+  "description": "Postman collection for the StockAccount API, run with newman",
+  "scripts": {
+    "build": "node build-collection.mjs",
+    "test": "newman run StockAccount.postman_collection.json -e StockAccount.local.postman_environment.json --reporters cli,json --reporter-json-export results/newman-local.json",
+    "test:docker": "newman run StockAccount.postman_collection.json -e StockAccount.docker.postman_environment.json --reporters cli,json --reporter-json-export results/newman-docker.json"
+  },
+  "devDependencies": {
+    "newman": "^6.2.1"
+  }
+}
