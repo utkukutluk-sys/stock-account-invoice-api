@@ -41,8 +41,7 @@ public static class DependencyInjection
             })
             .AddRoles<AppRole>()
             .AddEntityFrameworkStores<AppDbContext>()
-            .AddErrorDescriber<TurkishIdentityErrorDescriber>()
-            .AddDefaultTokenProviders();
+            .AddErrorDescriber<TurkishIdentityErrorDescriber>();
 
         services.AddSingleton<ITokenService, JwtTokenService>();
         services.AddAppCaching(configuration);
