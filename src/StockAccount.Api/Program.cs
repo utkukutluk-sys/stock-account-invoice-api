@@ -1,44 +1,139 @@
-using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
-using StockAccount.Application.Common.Identity;
-using StockAccount.Infrastructure.Persistence;
-using StockAccount.Infrastructure.Persistence.Seed;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
+using Serilog;
+using StockAccount.Api.ErrorHandling;
+using StockAccount.Api.Filters;
+using StockAccount.Api.Json;
+using StockAccount.Api.Middleware;
+using StockAccount.Api.Security;
+using StockAccount.Api.Setup;
+using StockAccount.Application;
+using StockAccount.Application.Common.Abstractions;
+using StockAccount.Application.Common.Exceptions;
+using StockAccount.Infrastructure;
+using StockAccount.Infrastructure.Caching;
+using StockAccount.Infrastructure.Startup;
 
-// MINIMAL BOOTSTRAP created by the DB agent so the solution builds and the database can be migrated/seeded.
-// Owned by the Backend agent from here on (BE-2, BE-8, BE-9): replace freely.
-var builder = WebApplication.CreateBuilder(args);
+Log.Logger = new LoggerConfiguration()
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-builder.Services.AddPersistence(builder.Configuration);
+try
+{
+    var builder = WebApplication.CreateBuilder(args);
 
-// Placeholder Identity registration (Backend replaces with full config, CONTRACT §4.1).
-builder.Services
-    .AddIdentityCore<AppUser>(o =>
+    builder.Host.UseSerilog((context, services, configuration) => configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext());
+
+    // Layers
+    builder.Services.AddApplication(builder.Configuration);
+    builder.Services.AddInfrastructure(builder.Configuration);
+    builder.Services.AddScoped<ICurrentUser, HttpCurrentUser>();
+    builder.Services.AddApiAuthentication(builder.Configuration);
+
+    // MVC + JSON (camelCase, enums as strings, UTC DateTimes with Z)
+    builder.Services
+        .AddControllers(o => o.Filters.Add<ValidationFilter>())
+        .AddJsonOptions(o =>
+        {
+            o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+            o.JsonSerializerOptions.Converters.Add(new UtcDateTimeConverter());
+        });
+    builder.Services.Configure<ApiBehaviorOptions>(o => o.InvalidModelStateResponseFactory = context =>
     {
-        o.User.RequireUniqueEmail = true;
-        o.Password.RequiredLength = 8;
-        o.Password.RequireDigit = true;
-        o.Password.RequireUppercase = true;
-        o.Password.RequireLowercase = true;
-        o.Password.RequireNonAlphanumeric = false;
-    })
-    .AddRoles<AppRole>()
-    .AddEntityFrameworkStores<AppDbContext>();
+        var errors = context.ModelState
+            .Where(e => e.Value?.Errors.Count > 0)
+            .GroupBy(e => ProblemWriter.ToCamelPath(e.Key))
+            .ToDictionary(g => g.Key, g => g.SelectMany(e => e.Value!.Errors).Select(e => string.IsNullOrEmpty(e.ErrorMessage) ? "Geçersiz değer." : e.ErrorMessage).ToArray());
+        var problem = ProblemWriter.Create(context.HttpContext, StatusCodes.Status400BadRequest, ErrorCodes.ValidationFailed, GlobalExceptionHandler.ValidationDetail, errors);
+        return new BadRequestObjectResult(problem) { ContentTypes = { "application/problem+json" } };
+    });
 
-var app = builder.Build();
+    builder.Services.AddProblemDetails(o => o.CustomizeProblemDetails = ctx => ProblemWriter.Enrich(ctx.HttpContext, ctx.ProblemDetails));
+    builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
-if (app.Configuration.GetValue("Database:MigrateOnStartup", false))
+    builder.Services.Configure<ForwardedHeadersOptions>(o =>
+    {
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        // The API sits behind the UI proxies (nginx / Nitro) on a private network; trust their forwarded headers.
+        o.KnownIPNetworks.Clear();
+        o.KnownProxies.Clear();
+    });
+
+    // CORS only for dev tooling (browsers use the same-origin /api proxy, CONTRACT §8.1).
+    var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+    builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
+        .WithOrigins(corsOrigins)
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials()
+        .WithExposedHeaders(CorrelationIdMiddleware.HeaderName, "X-Cache", "ETag", "Location")));
+
+    builder.Services.AddApiSwagger();
+    builder.Services.AddApiHealthChecks(builder.Configuration);
+
+    var app = builder.Build();
+
+    var cacheState = app.Services.GetRequiredService<CacheProviderState>();
+    if (cacheState is { Enabled: true, UsingRedis: false })
+    {
+        app.Logger.LogWarning("Redis cache not used, falling back to {CacheProvider}", cacheState.Describe());
+    }
+    else
+    {
+        app.Logger.LogInformation("Cache provider: {CacheProvider}", cacheState.Describe());
+    }
+
+    await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration, app.Logger, app.Lifetime.ApplicationStopping);
+
+    app.UseForwardedHeaders();
+    app.UseMiddleware<CorrelationIdMiddleware>();
+    app.UseSerilogRequestLogging(o =>
+    {
+        o.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0} ms";
+        o.EnrichDiagnosticContext = (diagnostics, http) =>
+        {
+            diagnostics.Set("UserId", http.User.FindFirst("sub")?.Value);
+            diagnostics.Set("ClientIp", http.Connection.RemoteIpAddress?.ToString());
+            diagnostics.Set("CorrelationId", CorrelationIdMiddleware.Get(http));
+        };
+    });
+    app.UseExceptionHandler();
+    app.UseStatusCodePages();
+
+    app.UseSwagger();
+    app.UseSwaggerUI(o =>
+    {
+        o.SwaggerEndpoint("/swagger/v1/swagger.json", "StockAccount API v1");
+        o.RoutePrefix = "swagger";
+        o.DocumentTitle = "StockAccount API";
+    });
+
+    app.UseCors();
+    app.UseAuthentication();
+    app.UseAuthorization();
+    app.UseMiddleware<UserLogContextMiddleware>();
+    app.UseMiddleware<ETagMiddleware>();
+
+    app.MapControllers();
+    app.MapApiHealthChecks();
+    app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
+
+    await app.RunAsync();
+}
+catch (Exception ex) when (ex is not HostAbortedException)
 {
-    await using var scope = app.Services.CreateAsyncScope();
-    await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.MigrateAsync();
+    Log.Fatal(ex, "API host terminated unexpectedly");
+    throw;
+}
+finally
+{
+    await Log.CloseAndFlushAsync();
 }
 
-if (app.Configuration.GetValue("Database:Seed", false))
-{
-    await DataSeeder.SeedAsync(app.Services);
-}
-
-app.MapGet("/", () => "StockAccount API");
-
-await app.RunAsync();
-
+/// <summary>Entry point marker for WebApplicationFactory (integration tests).</summary>
 public partial class Program;
