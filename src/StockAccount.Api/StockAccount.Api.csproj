@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>StockAccount.Api</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StockAccount.Application\StockAccount.Application.csproj" />
+    <ProjectReference Include="..\StockAccount.Infrastructure\StockAccount.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Required in the startup project for `dotnet ef` (brings Microsoft.EntityFrameworkCore.Design). -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

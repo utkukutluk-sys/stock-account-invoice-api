@@ -1,0 +1,75 @@
+# ---- .NET / Visual Studio / Rider ----
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ll]og/
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+*.cache
+project.lock.json
+project.fragment.lock.json
+artifacts/
+TestResults/
+[Tt]est[Rr]esult*/
+*.trx
+coverage*.json
+coverage*.xml
+coverage*.info
+*.coverage
+*.coveragexml
+*.nupkg
+*.snupkg
+.nuget/packages/
+publish/
+PublishProfiles/
+*.pubxml
+*.DotSettings.user
+
+# ---- App logs / runtime ----
+logs/
+*.log
+
+# ---- Secrets / env ----
+.env
+.env.*
+!.env.example
+appsettings.*.local.json
+secrets.json
+
+# ---- Node / Vite / Nuxt / Playwright ----
+node_modules/
+dist/
+.output/
+.nuxt/
+.nitro/
+.cache/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+newman/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Generated SQL scripts (regenerate with dotnet ef migrations script) ----
+/artifacts-sql/

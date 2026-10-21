@@ -1,0 +1,19 @@
+* text=auto eol=lf
+
+# Windows-native files keep CRLF
+*.sln   text eol=crlf
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.pdf  binary
+*.zip  binary

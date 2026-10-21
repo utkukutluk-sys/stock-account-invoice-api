@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <!-- Production code (src/**) must build with zero warnings. -->
+  <PropertyGroup Condition="$(MSBuildProjectDirectory.Contains('$([System.IO.Path]::DirectorySeparatorChar)src$([System.IO.Path]::DirectorySeparatorChar)'))">
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <!-- CS1591: missing XML comment. Api enables GenerateDocumentationFile for Swagger; do not force docs on every member. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>
