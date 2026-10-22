@@ -42,7 +42,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Docker
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True
-      ConnectionStrings__Redis: redis:6379,abortConnect=false,connectTimeout=2000
+      ConnectionStrings__Redis: redis:6379,abortConnect=false,connectTimeout=1000,syncTimeout=1000,asyncTimeout=1000
       Jwt__Key: ${JWT_KEY}
       Database__MigrateOnStartup: "true"
       Database__Seed: "true"

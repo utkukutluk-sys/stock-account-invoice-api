@@ -34,6 +34,9 @@ public sealed class CacheOptions
     public int EntityTtlMinutes { get; set; } = 10;
     public int ListTtlMinutes { get; set; } = 5;
 
+    /// <summary>After a Redis failure, Redis is bypassed (in-memory fallback) for this many seconds before a probe (BUG-6).</summary>
+    public int CircuitBreakSeconds { get; set; } = 30;
+
     public TimeSpan EntityTtl => TimeSpan.FromMinutes(EntityTtlMinutes);
     public TimeSpan ListTtl => TimeSpan.FromMinutes(ListTtlMinutes);
 }

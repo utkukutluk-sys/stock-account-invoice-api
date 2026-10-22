@@ -16,7 +16,7 @@ Notes: record deviations from CONTRACT, `REQUEST → <agent>: ...` for cross-are
 | BE-1 | Paging/sorting/tenant helpers, exceptions, ProblemDetails, validation | Backend | Done | ProblemDetails always has code/traceId/correlationId; validation keys camelCase; SortMap whitelists. See docs/BACKEND_NOTES.md; BUG-2 fixed (binding errors as problem+json, Turkish) |
 | BE-2 | Identity, JWT, refresh tokens, policies, AuthController | Backend | Done | Cookie sa_refresh (HttpOnly, Strict, Path=/), atomic rotation, reuse detection + 30 s grace; refresh/logout need JSON content type (else 415). Admin scope via X-Company-Id header only (sa_company cookie not read by API) |
 | BE-3 | Companies & Users | Backend | Done | BUG-1 fixed (companies/current Operator) |
-| BE-4 | Cache service + Stocks & CurrentAccounts | Backend | Done | Redis (sa: prefix) with in-memory fallback; versioned list keys; X-Cache verified HIT/MISS |
+| BE-4 | Cache service + Stocks & CurrentAccounts | Backend | Done | Redis (sa: prefix) with in-memory fallback; versioned list keys; X-Cache verified HIT/MISS; BUG-6 fixed (circuit breaker + in-memory fallback, flush sa:* on recovery, 1 s Redis timeouts) |
 | BE-5 | Invoices CRUD, approve, cancel, numbering | Backend | Done | Execution strategy + single SaveChanges + retry x3; GrandTotal 0 → no ActTrans (coordinator). Inactive stock/account rejected already on save (422) |
 | BE-6 | Transactions, dashboard, portal endpoints | Backend | Done | act-trans sort excludes quantity (no such field) |
 | BE-7 | Reconciliation BackgroundService + admin endpoint | Backend | Done | Uses DB views; Reconciliation:InitialDelaySeconds added |

@@ -83,7 +83,8 @@ public sealed class RedisOutageTests(ApiFixture fx, Xunit.Abstractions.ITestOutp
             var f = fx.CreateFactory(new Dictionary<string, string?>
             {
                 ["Cache:UseRedis"] = "true",
-                ["ConnectionStrings:Redis"] = $"localhost:{Port},abortConnect=false,connectTimeout=2000",
+                ["ConnectionStrings:Redis"] = $"localhost:{Port},abortConnect=false,connectTimeout=1000,syncTimeout=1000,asyncTimeout=1000",
+                ["Cache:CircuitBreakSeconds"] = "2", // BUG-6: short break so the recovery phase below stays quick
             });
             var anon = fx.NewSession(f);
             var health = await HealthAsync(anon);
@@ -110,9 +111,11 @@ public sealed class RedisOutageTests(ApiFixture fx, Xunit.Abstractions.ITestOutp
             var t = Stopwatch.StartNew();
             var list = await op.GetJsonAsync("/api/stocks?pageSize=5");
             output.WriteLine($"GET list with Redis down: {t.ElapsedMilliseconds} ms");
+            Assert.True(t.Elapsed < TimeSpan.FromSeconds(1), $"BUG-6: cached list during outage took {t.ElapsedMilliseconds} ms");
             t.Restart();
             await op.GetJsonAsync(url);
             output.WriteLine($"second GET by id with Redis down: {t.ElapsedMilliseconds} ms");
+            Assert.True(t.Elapsed < TimeSpan.FromSeconds(1), $"BUG-6: cached GET by id during outage took {t.ElapsedMilliseconds} ms");
             t.Restart();
             await op.GetJsonAsync("/api/invoices?pageSize=5");
             output.WriteLine($"GET invoices (not cached) with Redis down: {t.ElapsedMilliseconds} ms");
@@ -124,7 +127,7 @@ public sealed class RedisOutageTests(ApiFixture fx, Xunit.Abstractions.ITestOutp
             Assert.Equal("Approved", approved["status"].Str());
             Assert.Equal(3m, (await op.GetJsonAsync(url))["balance"].Dec());
             output.WriteLine($"outage phase total: {sw.ElapsedMilliseconds} ms");
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(60), $"degraded requests too slow: {sw.Elapsed}");
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"degraded requests too slow: {sw.Elapsed}");
 
             health = await HealthAsync(anon);
             Assert.Equal("Degraded", health["status"].Str());
@@ -133,17 +136,25 @@ public sealed class RedisOutageTests(ApiFixture fx, Xunit.Abstractions.ITestOutp
 
             // ---- Redis comes back → cache works again
             Run(docker, $"start {Container}");
+            // While the circuit is open the in-memory fallback also answers HIT, so "recovered" means: the entry is in
+            // Redis again (written after the breaker's probe flushed the pre-outage keys) and the health check is Healthy.
             var recovered = false;
             for (var i = 0; i < 40 && !recovered; i++)
             {
                 await Task.Delay(500);
                 using var a = await op.GetAsync(url);
                 using var b = await op.GetAsync(url);
-                recovered = XCache(b) == "HIT";
+                var inRedis = Run(docker, $"exec {Container} redis-cli --scan --pattern sa:stock:{stock["id"].Int()}", throwOnError: false).Output.Contains($"sa:stock:{stock["id"].Int()}");
+                recovered = XCache(b) == "HIT" && inRedis
+                    && (await HealthAsync(anon))["checks"]!["redis"]!["status"].Str() == "Healthy";
             }
 
             Assert.True(recovered, "cache did not recover after Redis restart");
-            Assert.Equal("Healthy", (await HealthAsync(anon))["checks"]!["redis"]!["status"].Str());
+
+            // The pre-outage entry (name before "Redis yok", balance 0) must not come back from Redis (BUG-6 invalidation).
+            var after = await op.GetJsonAsync(url);
+            Assert.Equal("Redis yok", after["name"].Str());
+            Assert.Equal(3m, after["balance"].Dec());
         }
         finally
         {
