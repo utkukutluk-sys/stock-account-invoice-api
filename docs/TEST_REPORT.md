@@ -4,6 +4,22 @@ Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11
 
 ## 1. Summary
 
+### 1.1 Round 2: regression after the fixes (d918312 Backend BUG-1/2/3/5, f5be41d Frontend BUG-4), from a clean state
+
+| Suite | Result | Duration |
+|---|---|---|
+| `dotnet build StockAccount.slnx` | 0 warnings, 0 errors | – |
+| Unit | **90 / 90 passed** | ~1 s |
+| Integration | **153 / 153 passed, 0 skipped**. New: Swagger regression (44), time-based rules (4), Redis runtime outage (1) | ~62 s (54 s of it is the Redis outage test, see BUG-6) |
+| newman, local API (the "Regression – fixed bugs" folder now always runs) | **115 requests, 350 assertions, 0 failed** | ~4 s |
+| Swagger re-check | 43 operations, **all have a 2xx response**, Bearer only on `[Authorize]` operations (login/refresh/logout anonymous), `X-Company-Id` on operator endpoints | – |
+| Playwright, local dev servers, 4 projects (vue, nuxt, vue-mobile, nuxt-mobile) | **58 tests: 56 passed, 2 skipped** (Nuxt-only tests on vue), 0 failed. The BUG-4 test is a normal passing test now, and the Nuxt logout workaround was removed | 4.5 min |
+| Docker: `compose up -d --build` (api + ui-nuxt rebuilt) | all 5 services healthy; newman **115 / 350 / 0 failed**; Playwright `@smoke` **17 passed, 1 skipped** (incl. both mobile projects); BUG-4, dark-mode and proactive-refresh tests **6/6** on the production images; `down -v`, sa-redis restarted | 36 s up, 1.5 min smoke |
+
+Bug status: BUG-1…BUG-5 **Verified**. New in round 2: **BUG-6** (Medium, Backend), Redis outage latency (§5).
+
+### 1.2 Round 1: initial run (history)
+
 | Suite | Location | Result | Duration |
 |---|---|---|---|
 | Unit (written by Backend, B9; verified) | `tests/StockAccount.UnitTests` | **90 / 90 passed** | ~1 s |
@@ -13,7 +29,7 @@ Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11
 | Docker full stack (compose build + up) | `docker-compose.yml` | all 5 images built on first try; all services healthy; newman **113/341/0 failed**; Playwright smoke **15 passed** (incl. BUG-4 expected failure on Nuxt), 1 skipped | build 1 min 11 s, smoke 1.9 min |
 | Swagger check | `/swagger/v1/swagger.json` | all 42 contract `/api` operations documented, Bearer scheme present; documentation gaps → BUG-3 | – |
 
-Bugs found: **5** (1 High Frontend, 1 Medium Backend, 3 Low Backend). Details in §5.
+Bugs found: **6** in total. Round 1: 5 (1 High Frontend, 1 Medium Backend, 3 Low Backend), all Verified fixed in round 2. Round 2: 1 new (BUG-6, Medium, Backend). Details in §5.
 
 ## 2. How to run
 
@@ -44,10 +60,13 @@ Infrastructure: `ApiFactory` (WebApplicationFactory<Program>, settings via `UseS
 | `CacheAndETagTests` (+ `CacheCompanyAndSearchTests`) | 13 | #7–8: `X-Cache` MISS→HIT, invalidation on PUT/create/delete, normalized query hash (param order), draft CRUD keeps cache, approve/cancel invalidate stock+account by-id and list entries for company **and** `all` scope, tenant check on cached by-id entry, company rename refreshes `companyName`, ETag weak 16-hex + `Cache-Control: private, no-cache` + 304 empty body on 5 endpoints, ETag changes after mutation, no ETag on `/api/auth/**`; Turkish-collation search of codes with `I` |
 | `DeleteReconciliationPortalTests` | 5 | #12–13: STOCK_HAS_BALANCE, STOCK_IN_USE, ACCOUNT_IN_USE (draft), ACCOUNT_HAS_BALANCE, 204 → 404, history survives soft delete; reconciliation 0 → tamper `Stocks.Balance` via SQL → 1 discrepancy (exact stored/ledger/difference) → `fix=true` corrects DB and API → 0; account tampering; ledger immutability triggers (50001); portal sees only own non-draft data |
 | `HealthAndErrorTests` | 7 | #14: test DB actually used, `/health` 200 with sql check, `X-Correlation-Id` echoed/generated and in ProblemDetails, unknown route 404 problem, validation problem shape, seed (ALS000001, S001 ≤ −18 714, 5 stocks), enums as strings / ISO dates |
-| `KnownBugTests` | 2 (skipped) | BUG-1, BUG-2 contract assertions; remove `Skip` after fix |
+| `KnownBugTests` | 2 | BUG-1, BUG-2 regression (skipped in round 1, active since the fix) |
+| `SwaggerTests` | 44 | BUG-3 regression: each of the 43 contract operations has a 2xx response and the right auth (anonymous vs bearer + 401); Bearer scheme; typed `StockDto`/`InvoiceDto` schemas |
+| `TimeAndScheduleTests` | 4 | access token expires after 15 min (shifted `TimeProvider`), refresh token after 7 days, lockout ≈ 5 min and released after `LockoutEnd`, reconciliation BackgroundService runs after `InitialDelaySeconds` and auto-fixes |
+| `RedisOutageTests` | 1 | real Redis container stopped at runtime: requests keep working, `/health` Degraded, recovery after restart; latency measured (BUG-6) |
 
 ### 3.2 Postman (`postman/StockAccount.postman_collection.json`, v2.1, 11 folders / 113 requests)
-Auth (12) · Companies (11) · Users (7) · Stocks (17) · CurrentAccounts (8) · Invoices (25) · Transactions (6) · Portal (6) · Admin (4: reconciliation, operator 403, `/health`, swagger.json) · **Scenario – Ahmet Elma** (14 ordered requests: read ELMA/C001 → Draft 100/1/101 → approve `SAT\d{6}` → exactly one Out 2 / one Debit 101 → balances −2 / +101 → portal sees it → admin cancel → balances restored → reversal rows) · Known bugs (1, skipped by default).
+Auth (12) · Companies (11) · Users (7) · Stocks (17) · CurrentAccounts (8) · Invoices (25) · Transactions (6) · Portal (6) · Admin (4: reconciliation, operator 403, `/health`, swagger.json) · **Scenario – Ahmet Elma** (14 ordered requests: read ELMA/C001 → Draft 100/1/101 → approve `SAT\d{6}` → exactly one Out 2 / one Debit 101 → balances −2 / +101 → portal sees it → admin cancel → balances restored → reversal rows) · Regression – fixed bugs (3: BUG-1, BUG-2, BUG-3; always run since round 2).
 Collection-level pre-request script logs in as admin when `accessToken` is empty/expiring and stores it; the refresh token lives only in newman's cookie jar (Auth folder demonstrates refresh rotation, 415, logout, refresh-after-logout 401). Tokens/ids are captured into collection variables; every create uses unique codes so the collection is re-runnable against the same DB (verified: two consecutive local runs + one docker run green). Environments: `StockAccount.local.postman_environment.json`, `StockAccount.docker.postman_environment.json` (baseUrl `http://localhost:5080/api`, `hostUrl`, seed credentials).
 
 ### 3.3 E2E (`e2e/`, Playwright, Chromium; projects `vue` and `nuxt`, 21 tests each)
@@ -56,6 +75,9 @@ Collection-level pre-request script logs in as admin when `accessToken` is empty
 | `auth.spec.ts` | 6 | #1 invalid login → `login-error`, admin → "Gösterge Paneli", full admin menu + company switcher, logout → `/login`, guard `?redirect=`; redirect honoured after login; #7 operator menu (no companies/users/reconciliation/switcher), `/companies` → `/403`; #6 portal → `/my-account`, `my-balance`, no `nav-stocks`, `/stocks` → `/403`; logged-in `/login` redirect, 404 page; BUG-4 responsiveness check |
 | `crud.spec.ts` | 6 | #2 stock CRUD as admin in Demo (create with Select/InputNumber, lower-case code normalized, search, edit, delete via "Silme Onayı"/"Evet", empty message), duplicate code error toast, "Tüm Firmalar" warning + disabled "Yeni", #3 account CRUD (type change shows "Müşteri/Tedarikçi"), no delete button for operator, #8 search "EL" → only ELMA, URL query sync, paginator page 2 (10 + 2 rows), unit filter |
 | `invoice.spec.ts` | 4 | #4 Ahmet/Elma in the UI: AutoCompletes (account + stock), price/VAT pre-fill, live totals `data-value` 100/1/101, save → "Taslak", approve confirm text → "Onaylandı" + `SAT\d{6}`, read-only; ELMA `stock-balance` −2 (and in "Hareketler" tab), C001 `account-balance` +101, Stok Hareketleri row "Çıkış", Cari Hareketleri "Borç"; #5 operator has no cancel button, admin cancels with reason → "İptal Edildi", balances restored; insufficient stock → error toast "Hata" mentioning ELMA, draft deleted; account AutoComplete filtered by type, multi-line totals 810 / 150.6 / 960.6, line remove |
+| `admin.spec.ts` (round 2) | 5 | companies CRUD + switcher, duplicate tax number / non-empty delete toasts, users CRUD (portal user linked to an account logs in → `/my-account`), duplicate e-mail, reconciliation screen run → tamper → 1 discrepancy → fix → 0 |
+| `ui.spec.ts` (round 2) | 2 | dark mode toggle + persistence (Nuxt: SSR HTML has `app-dark`); proactive token refresh with `page.clock` |
+| `mobile.spec.ts` (round 2, projects `vue-mobile`/`nuxt-mobile`, Pixel 7) | 1 | login, collapsed menu + toggle, list search, invoice editor totals, no horizontal overflow |
 | `session-cache.spec.ts` | 5 | #9 no token in localStorage/sessionStorage (checked against the real token), `sa_refresh` httpOnly/Strict/Path=/ and not in `document.cookie`, reload of `/stocks` keeps the session (Vue: POST `/auth/refresh` observed), `clearCookies` + reload → `/login`; portal sees only own invoices and correct balance; #10 Dashboard→Stocks→Dashboard→Stocks→… issues ≤ 1 `GET /api/stocks`, after creating a stock the list is requested again, "Yenile" bypasses cache; Nuxt: SSR-loaded list makes **0** browser data requests; #11 Nuxt SSR: `/login` HTML has `login-email`, `/stocks` HTML (with cookies) contains `stock-table` and data rows, anonymous SSR `/stocks` → 302 to `/login` |
 
 ## 4. Contract scenario coverage
@@ -81,13 +103,14 @@ Collection-level pre-request script logs in as admin when `accessToken` is empty
 
 ## 5. Bugs
 
-| ID | Severity | Owner | Title |
-|---|---|---|---|
-| BUG-1 | Medium | Backend | `GET /api/companies/current` returns 403 for operators |
-| BUG-2 | Low | Backend | JSON/model-binding 400s are not `application/problem+json` and leak English framework messages |
-| BUG-3 | Low | Backend | Swagger gaps: missing 2xx responses on 28 operations, Bearer required on anonymous auth endpoints |
-| BUG-4 | **High** | Frontend (ui-nuxt) | Page freezes (main thread blocked) after logout that follows a client-side login |
-| BUG-5 | Low | Backend | Request-completion log lines have an empty `CompanyId` |
+| ID | Severity | Owner | Title | Status |
+|---|---|---|---|---|
+| BUG-1 | Medium | Backend | `GET /api/companies/current` returns 403 for operators | **Verified** (d918312): integration `KnownBugTests` and matrix (operator ok), newman regression |
+| BUG-2 | Low | Backend | JSON/model-binding 400s are not `application/problem+json` and leak English framework messages | **Verified**: strict problem+json in `CrudTests` and `KnownBugTests`, newman regression |
+| BUG-3 | Low | Backend | Swagger gaps: missing 2xx responses on 28 operations, Bearer required on anonymous auth endpoints | **Verified**: `SwaggerTests` (43 operations: 2xx and auth), newman regression |
+| BUG-4 | **High** | Frontend (ui-nuxt) | Page freezes (main thread blocked) after logout that follows a client-side login | **Verified** (f5be41d): E2E regression on nuxt dev and on the Docker image; workarounds removed |
+| BUG-5 | Low | Backend | Request-completion log lines have an empty `CompanyId` | **Verified**: the last 400 operator request lines in `logs/api-20261022.log` all show `[U:2] [C:1]` |
+| BUG-6 | Medium | Backend | When Redis goes down at runtime, every cached read and write waits for the Redis timeouts (4–8 s per request) | **Open** |
 
 ### BUG-1 — Operator gets 403 on `GET /api/companies/current` (Medium, Backend)
 - Repro: `POST /api/auth/login` as `demo@stockaccount.local / Demo123!` → `GET /api/companies/current` with the bearer token.
@@ -142,6 +165,28 @@ Tests:
 - Actual: `logs/api-*.log` request-completion lines (`HTTP GET /api/stocks responded 200`) show `[U:2] [C:]` for the Demo operator. Locally 1 190 lines have an empty `C`, and only the 45 business-event lines have `[C:1]`. This was seen locally and in Docker.
 - Cause (suspected): `UseSerilogRequestLogging` sits outside `UserLogContextMiddleware`. `UserId` is added through `EnrichDiagnosticContext`, but `CompanyId` is not. Fix: also call `diagnostics.Set("CompanyId", …)`.
 
+### BUG-6 — Redis outage at runtime makes cached endpoints very slow (Medium, Backend)
+Repro (automated in `RedisOutageTests`):
+1. Start the API with `Cache:UseRedis=true` against a Redis container.
+2. Warm the cache with `GET /api/stocks/{id}` (MISS, then HIT).
+3. Stop the container (`docker stop`).
+4. Repeat the requests.
+
+What works as the contract requires: every request still succeeds, `X-Cache: MISS`, data is fresh, PUT and approve work, `/health` → 200 `Degraded` (redis Degraded, sql Healthy), and the cache recovers after `docker start`.
+
+The problem is latency:
+
+| Request | Time with Redis down |
+|---|---|
+| `GET /api/stocks/{id}` | 4.0–4.3 s |
+| `GET /api/stocks?pageSize=5` | 8.0 s |
+| Not-cached `GET /api/invoices` (comparison) | 74 ms |
+| Outage phase, 7 requests | 52 s |
+
+- Expected: after the first failure the API should stop waiting on Redis quickly, for example with a circuit breaker / short-lived "Redis down" flag in `DistributedCacheService`, or a much lower timeout. CONTRACT §6 only says failures must not fail a request; it says nothing about latency. The runtime fallback (in-memory cache used when Redis drops) is unspecified, so this is rated Medium for performance.
+- Cause (suspected): each cache operation waits for the 2 s StackExchange.Redis sync/async timeout. A versioned list read does 2–4 operations: version get/set and list get/set.
+- The test only asserts that the outage phase takes < 60 s, so it stays green. Tighten that limit after the fix.
+
 ### Observations (not bugs)
 - Under heavy contention (6 parallel approvals on one stock), some approvals end with 409 `CONCURRENCY_CONFLICT` after the 3 retries instead of `INSUFFICIENT_STOCK`. This is contract-conformant (§3.6), and the stock is never oversold; clients should simply retry. With 2 contenders it is always one OK and one INSUFFICIENT_STOCK.
 - `GET /api/me/invoices?status=Draft` → 400, because only Approved/Cancelled are accepted. This is an acceptable reading of §5.10.
@@ -150,12 +195,22 @@ Tests:
 - The Frontend Dockerfiles (ui-vue nginx, ui-nuxt node) built and passed health checks on the first real build, so there are no Frontend Docker bugs. The Redis keys `sa:stock:list:{scope}:{ver}:{hash}` were verified in the compose Redis, and logs in `/app/logs`.
 
 ## 6. Not tested / limits
-- Redis outage at runtime (fallback switch): integration tests run with the in-memory cache and the cache-error-swallowing behaviour is covered by the unit tests only. Redis was healthy in Docker.
-- Reconciliation **background schedule** (5 min interval / 30 s delay): it is disabled in the tests, and only `IReconciliationService` via the endpoint is tested.
-- Access-token expiry (15 min) and the proactive < 60 s refresh in the UIs: there is no clock manipulation. The 401 → refresh → retry path is covered indirectly by reload tests only.
-- Lockout expiry after 5 min, the 7-day refresh expiry, and cross-site SameSite behaviour (first navigation from another site).
-- Responsive layout below 992 px, dark mode, and the user/company/reconciliation admin pages in the UI are not covered by E2E. They are covered at API level.
-- Performance and load testing beyond the parallel approval tests.
+
+Round 2 closed these gaps:
+- **Redis down at runtime**: `RedisOutageTests` uses its own container `sa-redis-it`:6390, never the dev `sa-redis`. It is skipped automatically when docker is not available (`DOCKER_EXE` overrides the binary path).
+- **Access-token expiry (15 min)** and **refresh-token expiry (7 days)**: `TimeAndScheduleTests` replaces the DI `TimeProvider` with a shiftable clock.
+- **Lockout**: duration ≈ 5 min is asserted from `LockoutEnd`, and expiry is simulated by moving `LockoutEnd` into the past, because Identity uses the system clock.
+- **Reconciliation BackgroundService schedule**: tested with `InitialDelaySeconds=1` and `AutoFix=true`; the tampered balance is fixed by the service itself.
+- **UI proactive refresh**: Playwright `page.clock.fastForward('14:30')` makes the client refresh before the 60 s limit.
+- **Admin screens E2E** (`admin.spec.ts`, 5 tests per UI): companies CRUD, users CRUD incl. a portal user that can log in, and the reconciliation screen with tamper → detect → fix. The tamper step needs local SQL and is skipped with `E2E_EXTERNAL=1`.
+- **Mobile** (`mobile.spec.ts`, Pixel 7 projects `vue-mobile`/`nuxt-mobile`): login, the collapsed sidebar toggle, list, the invoice editor and "no horizontal overflow".
+- **Dark mode** (`ui.spec.ts`): toggle, persistence across reload, and Nuxt SSR rendering `app-dark` from the `sa_theme` cookie.
+
+Still not tested:
+- The reconciliation interval itself: it is at least 1 min by code, and only the first run is asserted.
+- Lockout expiry through real time passing, because Identity does not use the injected `TimeProvider`.
+- Cross-site SameSite behaviour (first navigation from another site) and real iOS Safari, since the mobile run is Chromium device emulation.
+- Performance and load testing beyond the parallel approval tests and the BUG-6 latency measurement.
 
 ## 7. Requirement traceability (PLAN §6)
 
