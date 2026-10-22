@@ -12,8 +12,11 @@ import { defineConfig, devices } from '@playwright/test';
 const ui = process.env.E2E_UI ?? 'both';
 const external = process.env.E2E_EXTERNAL === '1';
 const apiPort = process.env.E2E_API_PORT ?? '5081';
-const vueUrl = process.env.E2E_BASE_URL ?? process.env.E2E_VUE_URL ?? 'http://localhost:5173';
-const nuxtUrl = process.env.E2E_BASE_URL ?? process.env.E2E_NUXT_URL ?? 'http://localhost:3000';
+// Dev-server ports are configurable so E2E can run next to the docker stack (which binds 5173/3000).
+const vuePort = process.env.E2E_VUE_PORT ?? '5173';
+const nuxtPort = process.env.E2E_NUXT_PORT ?? '3000';
+const vueUrl = process.env.E2E_BASE_URL ?? process.env.E2E_VUE_URL ?? (external ? 'http://localhost:5173' : `http://localhost:${vuePort}`);
+const nuxtUrl = process.env.E2E_BASE_URL ?? process.env.E2E_NUXT_URL ?? (external ? 'http://localhost:3000' : `http://localhost:${nuxtPort}`);
 
 const webServer = external
   ? []
@@ -28,9 +31,9 @@ const webServer = external
       },
       ...(ui === 'vue' || ui === 'both'
         ? [{
-            command: 'npm run dev -- --port 5173 --strictPort',
+            command: `npm run dev -- --port ${vuePort} --strictPort`,
             cwd: '../ui-vue',
-            url: 'http://localhost:5173',
+            url: `http://localhost:${vuePort}`,
             env: { VITE_PROXY_TARGET: `http://localhost:${apiPort}` },
             timeout: 120_000,
             reuseExistingServer: false,
@@ -38,10 +41,10 @@ const webServer = external
         : []),
       ...(ui === 'nuxt' || ui === 'both'
         ? [{
-            command: 'npm run dev',
+            command: `npx nuxt dev --port ${nuxtPort}`,
             cwd: '../ui-nuxt',
-            url: 'http://localhost:3000/login',
-            env: { NUXT_API_BASE: `http://localhost:${apiPort}` },
+            url: `http://localhost:${nuxtPort}/login`,
+            env: { NUXT_API_BASE: `http://localhost:${apiPort}`, PORT: nuxtPort },
             timeout: 180_000,
             reuseExistingServer: false,
           }]

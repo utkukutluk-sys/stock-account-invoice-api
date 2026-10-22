@@ -2,6 +2,130 @@
 
 Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11, .NET SDK 10.0.402, Node 24.22, SQL Server Express `.\SQLEXPRESS`, Docker 29.9.2, Playwright 1.64.1 (Chromium), newman 6.
 
+## 0. Round 3 — Production readiness (independent verification, git e0ae9c8, shared stack 1.4.0)
+
+This round re-checks the claims of commits 706a2b7…e0ae9c8 (BACKEND_NOTES §7, DB_NOTES §8/D15, FRONTEND_NOTES "Production readiness") with my own scripts in `tests/prod-readiness/`, not the authors' tests. All of them are re-runnable:
+
+| Script | Purpose |
+|---|---|
+| `rate-limit-coverage.mjs` | Every swagger operation against a Development API with tiny limits |
+| `proxy-ip-check.sh` | Client IPs through ui-vue nginx, the ui-nuxt proxy and the API port |
+| `env-validation.sh` | Fail-fast config, both images, `compose config` |
+| `fuzz-errors.mjs` / `fuzz-ui-errors.mjs` | Leak scan, 55 API cases and 42 UI cases |
+| `pool-health-check.sh` + `parallel-load.mjs` | Pool and live/ready health |
+
+The drill commands are in §0.5. The stack was left on **1.4.0, all 5 services healthy**, with `releases.json` `current = 1.4.0` and the Redis `sa:*` cache flushed.
+
+### 0.1 Checklist result
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| 1a | Rate limiting covers **all** endpoints | **PASS** | All **43/43** swagger operations return 429 on request N+1 (global 5/3 s per user, auth 2/3 s per IP for login/refresh), with `application/problem+json`, `code RATE_LIMITED` and `Retry-After`. Per-user partition: admin blocked while operator on the same IP is served. Per-IP partition for anonymous callers. Unknown `/api` routes are limited too. The auth policy is stricter and separate from the global bucket. `/health`, `/health/live`, `/health/ready`: 30/30 requests → 200. Waiting Retry-After → served again. |
+| 1b | Through ui-vue nginx / ui-nuxt proxy: separate buckets per client IP, spoofed XFF does not bypass | **PASS** | Each UI separately: host 100×401 then 429; host with a spoofed `X-Forwarded-For` (single value or chain) → still 429; a second client (container on the compose network) → 401, its own bucket. |
+| 1c | Spoofed XFF directly against the published API port | **FAIL → BUG-7** | `localhost:5080`: after 100×401 + 429, every request with a new spoofed XFF gets **401** again. 101 attempts with 101 fake IPs → 101 × 401, so login brute force is unlimited. |
+| 2 | Fail-fast startup validation | **PASS (1 gap → BUG-11)** | 17/18 cases. API image in Production exits **2** with one clear FTL line for: Jwt:Key missing / placeholder (change-me, DEV-ONLY image default) / too short; ConnectionStrings:Default empty; runtime `User Id=sa`; Redis enabled without a connection string; `0.0.0.0/0`; `::/0`; CORS `*`; and several errors reported at once. ui-nuxt image exits **1** when `NUXT_API_BASE` is missing, not absolute, or ends with `/api`. `docker compose config` exits 1 without JWT_KEY, MSSQL_SA_PASSWORD or APP_DB_PASSWORD. Distinctive secret values (passwords and keys) never appear in any output, and no secret appears in the logs of the api, db-migrate or Production containers. Positive control: a valid Production config starts and is ready. Gap: `0.0.0.0/1` + `128.0.0.0/1`, which trusts everyone, is accepted. |
+| 3 | Error handling hardening (Production), no leaks | **PASS (2 low findings: BUG-8, BUG-10)** | API, 55 fuzz cases (malformed or deep JSON, decimal overflow, 5 MB / 40 MB bodies, wrong content types, invalid route values, NUL, traversal, 100 KB URL, 64 KB header, bad X-Company-Id / bearer / alg none, 405, TRACE, OPTIONS, unknown routes, Swagger and appsettings/.env probes): **0 leaks**. No stack, type names, paths, SQL or `Server` / `X-Powered-By` header in any response. Swagger is off. 413 / 405 are problem+json. Findings: `page=2147483647` → **500** (BUG-8, generic body, no leak), and 415 is `application/json` instead of problem+json (BUG-10). UIs, 42 probes: **0 real leaks**. The scanner flagged 8 false positives on hashed `/_nuxt/9N0…js` names. Nuxt 404/500 pages are Turkish without stack; nginx default 400/405/413/414 pages show "nginx" without a version. |
+| 4 | DB pool + health | **PASS** | Effective runtime string: `User Id=stockaccount_app; Application Name=StockAccount.Api; Max Pool Size=100; Min Pool Size=10; Connect Timeout=15; Encrypt=True`. 2 × 400 parallel DB-bound requests: **800/800 × 200**, p95 ≈ 0.6 s, peak **38** `StockAccount.Api` sessions (≤ 100), **0** pool-timeout log lines. SQL stopped: `/health/live` 200; `/health/ready` **503 Unhealthy** (after 15.7 s = Connect Timeout); ready again 16 s after the SQL start. Redis stopped: ready **200 Degraded**, requests 200 (in-memory fallback), back to Healthy after the start. Docker health: api uses `/health/live` and stays `healthy` while SQL is down (by design); the UIs stay healthy. |
+| 5 | Rollback + backups | **PASS (1 finding → BUG-9)** | See §0.5. The one-command claim holds: `rollback.ps1` with no arguments. |
+| R | Full regression | **PASS** | See §0.2. |
+
+### 0.2 Regression (round 3)
+
+| Suite | Result |
+|---|---|
+| `dotnet build` | 0 warnings / 0 errors |
+| Unit | **99/99** |
+| Integration | **162/162**, 0 skipped. The Redis outage test now takes ~4 s instead of 54 s, which confirms the BUG-6 fix. |
+| newman (Docker stack) | **115 requests / 350 assertions / 0 failed** |
+| Playwright vue + nuxt + vue-mobile + nuxt-mobile | **58 tests: 56 passed, 2 skipped** (Nuxt-only on vue), 0 failed. Dev servers were run on 5174/3001 (new `E2E_VUE_PORT` / `E2E_NUXT_PORT`) next to the Docker stack. |
+| `npm run check:hydration` (ui-nuxt, against the container) | OK in 2 time zones |
+| Independent hydration test (`e2e/tests/hydration.spec.ts`, Nuxt container, America/Los_Angeles, 13 pages × light/dark) | **PASS**, no hydration warnings |
+
+### 0.3 New bugs
+
+| ID | Severity | Owner | Title | Status |
+|---|---|---|---|---|
+| BUG-7 | **High** | Backend (Docker config / compose) | Rate-limit bypass with a spoofed `X-Forwarded-For` on the published API port | Open |
+| BUG-8 | Low | Backend | `page=2147483647` → 500 (int overflow → negative OFFSET) | Open |
+| BUG-9 | Medium | DB (`scripts/db/restore.ps1`) | A standalone restore leaves the Redis cache stale, so deleted rows are still served | Open |
+| BUG-10 | Low | Backend | 415 responses use `application/json` instead of `application/problem+json` | Open |
+| BUG-11 | Low | Backend | The ForwardedHeaders check only rejects the literal `0.0.0.0/0` / `::/0` | Open |
+
+**BUG-7 — Rate-limit bypass via spoofed X-Forwarded-For on :5080 (High, Backend)**
+
+Repro (`tests/prod-readiness/proxy-ip-check.sh`, last phase, or by hand):
+1. Send 101 failed logins to `http://localhost:5080/api/auth/login`. The result is 100×401 and 1×429.
+2. Send the same request with the header `X-Forwarded-For: 203.0.113.50`. It returns **401**, not 429.
+3. Send 101 more requests, each with a new fake IP. All of them return **401**.
+
+- Expected: the client cannot choose its rate-limit partition. Login brute-force protection (`auth` policy, per IP) must hold.
+- Cause:
+  - `appsettings.Docker.json` trusts `172.16.0.0/12`, `192.168.0.0/16` and `10.0.0.0/8` as proxies.
+  - Host traffic to the published port arrives from the Docker gateway, which is inside those ranges, so the API believes any XFF the caller sends.
+  - Through the UI proxies the limit holds: nginx and Nitro append the real peer and `ForwardLimit=1`.
+- Fix options:
+  - Trust only the UI containers (fixed IPs / a dedicated proxy subnet without the gateway).
+  - Or stop publishing 5080 outside localhost / dev.
+  - Production must list its real proxies; the validator does not enforce that.
+
+**BUG-8 — Paging overflow gives 500 (Low, Backend)**
+- Repro: `GET /api/stocks?page=2147483647&pageSize=100`. The same happens on `/api/invoices`, `/api/stock-trans` and `/api/users`.
+- Result: 500 `INTERNAL_ERROR`. The body is generic, with no leak.
+- Log: `SqlException: The offset specified in a OFFSET clause may not be negative`.
+- Expected: 400 `VALIDATION_FAILED`, either by capping `page` so that `(page-1)*pageSize` fits in an int, or by computing the skip in `long`.
+
+**BUG-9 — Standalone `restore.ps1` does not flush the API cache (Medium, DB; Backend for the docs)**
+
+Repro:
+1. Run `backup.ps1 -Target docker -Label r3stale`.
+2. Create stock DRILLD (id 12) and read it twice, so the second read is `X-Cache: HIT`.
+3. Run `restore.ps1 -Target docker -Latest -Label r3stale -Force`. It ends with RESTORE OK.
+4. Read DRILLD again by id and through the list.
+
+- Result: `GET /api/stocks/12` → **200 X-Cache HIT** and the list shows DRILLD with `totalCount=1`, although the row no longer exists in the database (`COUNT(*)=0`).
+- This lasts for up to the cache TTL (10 min by id, 5 min for lists). Because the identity value is also rolled back, the next new stock can get id 12 again, and the stale DTO would then be served for a different row.
+- Only `rollback.ps1` flushes `sa:*`.
+- Expected: `restore.ps1 -Target docker` flushes `sa:*` itself, or refuses to finish without doing so. Restore documentation should mention it.
+- I flushed the keys by hand after the drill.
+
+**BUG-10 — 415 is not problem+json (Low, Backend)**
+- Repro: `POST /api/stocks` with `Content-Type` set to `text/plain`, `application/xml` or `application/x-www-form-urlencoded`, or with no content type.
+- Result: 415, with a ProblemDetails body (`code VALIDATION_FAILED`) but **`Content-Type: application/json`**. `/api/auth/refresh` returns problem+json correctly.
+
+**BUG-11 — Trust-all forwarded networks bypass the strict check (Low, Backend)**
+- Repro: run the API image with `ASPNETCORE_ENVIRONMENT=Production`, `ForwardedHeaders__KnownNetworks__0=0.0.0.0/1` and `ForwardedHeaders__KnownNetworks__1=128.0.0.0/1`.
+- Result: the API starts ("Now listening").
+- Expected: rejected like `0.0.0.0/0`, for example when a prefix is ≤ /8 or not in private/loopback space, or when the networks cover the whole address space.
+
+### 0.4 Observations (not filed as bugs)
+- 405 responses carry `code: NOT_FOUND`; `METHOD_NOT_ALLOWED` would be clearer.
+- `/health/ready` needs about 15.7 s to report Unhealthy when SQL is down, because of Connect Timeout 15. Probe timeouts must be longer than that (k8s default is 1 s).
+- After a SQL restart only 1 pooled session remained until load arrived, so Min Pool 10 is not re-established immediately. This is harmless.
+- The pool cap of 100 was never reached. 800 requests peaked at 38 sessions, so the "≤ Max Pool" property was observed but not stressed to the cap.
+- ui-vue nginx limits bodies to 1 MB. A 1–30 MB JSON body through `/api` gets nginx's **HTML** 413, while the API itself answers problem+json. Real requests are far below 1 MB.
+- nginx default error pages (400/405/414) carry no CSP and say "nginx" without a version.
+- Nuxt 404 status lines echo the path ("404 Page Not Found: /invoices/abc"). It is harmless.
+- The Docker API logs `No XML encryptor configured`: Data Protection keys are kept only in the container. This is unused by JWT/cookies here, but worth noting.
+- I could not make a deploy fail through a genuinely broken build, because temporarily editing `src/` was blocked as a shared-code change. The failing deploy therefore used a readiness budget that was too short (`-ReadyTimeoutSeconds 2`). This drives the real failure → auto-rollback → DB-restore path, but not a crashing container.
+
+### 0.5 Rollback / backup drill (shared stack, 2026-10-22 13:25–13:31 UTC)
+
+| Step | Command | Result | Time |
+|---|---|---|---|
+| D1 deploy | `deploy.ps1 -Version 1.4.1-drill` | pre-deploy backup OK, images tagged `:1.4.1-drill` + `:sha-e0ae9c823c5d`, api `APP_VERSION=1.4.1-drill`, healthy | **17 s** |
+| write | `POST /api/stocks` DRILLA | 201, list HIT | – |
+| D2 rollback, **one command** | `rollback.ps1` (no arguments) | 1.4.1-drill → 1.4.0, all `:1.4.0` and healthy; DRILLA **kept** (no DB restore) | **9 s** |
+| D3 deploy | `deploy.ps1 -Version 1.4.2-drill` | DEPLOYED | **14 s** |
+| write | DRILLB (id 11), list and by-id reads up to `X-Cache HIT` | – | – |
+| D3 rollback + DB | `rollback.ps1 -RestoreDatabase` | app stopped; restore from `pre-deploy-1.4.2-drill` (VERIFYONLY, CHECKDB clean, 16 tables / 231 rows = manifest); `sa:*` flushed; 1.4.0 healthy. DRILLB **gone** (list 0, by id 404, `X-Cache MISS`); DRILLA **kept**; runtime sessions `stockaccount_app` × 10; DB `MULTI_USER`, `ONLINE`, `AUTO_CLOSE 0`, `SIMPLE` | **13 s** |
+| D4 failing deploy | `deploy.ps1 -Version 1.4.3-drill -ReadyTimeoutSeconds 2` | DEPLOY FAILED → **automatic** rollback to 1.4.0 with DB restore from `pre-deploy-1.4.3-drill`; exit 1; DRILLC (written before the deploy) kept; `current = 1.4.0` | **25 s** (rollback 12 s) |
+| D4b | `rollback.ps1 -Version 9.9.9` | "image … not found locally", exit 1, stack untouched | – |
+| D5 retention | `backup.ps1 -Label r3drill -RetentionCount 2` × 3 | each exit 0 (1–2 s), only the newest 2 kept | – |
+| D5 corrupt | 16 bytes flipped in the newest `.bak` → `restore.ps1 -Latest -Label r3drill` (with or without `-Force`) | **refused**: "SHA-256 mismatch … (file changed or corrupted)", exit 1; nothing touched (no pre-restore backup, DB online) | 0 s |
+| D5 confirm | `restore.ps1 -File <intact>` without `-Force` | "Refusing to restore without -Force in non-interactive mode", exit 2 | – |
+| D5 restore | same with `-Force`; then a new backup + `restore.ps1 -Latest -Label r3drill -Force` | both RESTORE OK, CHECKDB clean, row counts = manifest | 7 s / 3 s |
+| D5 stale cache | standalone restore after caching a new row | **BUG-9** | – |
+
 ## 1. Summary
 
 ### 1.1 Round 2: regression after the fixes (d918312 Backend BUG-1/2/3/5, f5be41d Frontend BUG-4), from a clean state
