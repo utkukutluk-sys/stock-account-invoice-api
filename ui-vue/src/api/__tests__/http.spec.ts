@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AxiosAdapter, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { configureHttp, get, http, httpCache, post } from '../http'
+import { configureHttp, get, http, httpCache, httpTiming, post } from '../http'
 import { ApiError } from '../errors'
 import { createRefreshController } from '../refresh'
 
@@ -181,5 +181,73 @@ describe('cached GET over http', () => {
     await post('/stocks', { code: 'X' }, { invalidate: ['/stocks', '/dashboard'] })
     await get('/stocks', { page: 1 })
     expect(calls.filter((c) => c.method === 'get')).toHaveLength(2)
+  })
+})
+
+describe('429 rate limiting', () => {
+  const sleeps: number[] = []
+  beforeEach(() => {
+    sleeps.length = 0
+    httpTiming.sleep = async (ms: number) => {
+      sleeps.push(ms)
+    }
+  })
+
+  const limited = (retryAfter?: string): { status: number; data: unknown; headers: Record<string, string> } => ({
+    status: 429,
+    data: { status: 429, code: 'RATE_LIMITED', detail: 'Too many requests' },
+    headers: retryAfter ? { 'retry-after': retryAfter } : {},
+  })
+
+  it('retries an idempotent GET once after Retry-After', async () => {
+    session()
+    let n = 0
+    handler = () => (++n === 1 ? limited('2') : { status: 200, data: { ok: true } })
+    expect(await get('/stocks', null, { noCache: true })).toEqual({ ok: true })
+    expect(sleeps).toEqual([2000])
+    expect(calls).toHaveLength(2)
+  })
+
+  it('gives up after one retry with a Turkish message containing the wait time', async () => {
+    session()
+    handler = () => limited('3')
+    const err = (await get('/stocks', null, { noCache: true }).catch((e: unknown) => e)) as ApiError
+    expect(err.status).toBe(429)
+    expect(err.retryAfterSeconds).toBe(3)
+    expect(err.displayMessage).toBe('Çok fazla istek gönderildi, 3 sn sonra tekrar deneyin.')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('does not auto-retry when Retry-After is too long', async () => {
+    session()
+    handler = () => limited('60')
+    await expect(get('/stocks', null, { noCache: true })).rejects.toMatchObject({ status: 429 })
+    expect(calls).toHaveLength(1)
+    expect(sleeps).toEqual([])
+  })
+
+  it('never retries mutations or the login', async () => {
+    session()
+    handler = () => limited('1')
+    await expect(post('/stocks', { code: 'X' })).rejects.toMatchObject({ status: 429 })
+    await expect(http.post('/auth/login', { email: 'a', password: 'b' })).rejects.toMatchObject({ status: 429 })
+    expect(calls).toHaveLength(2)
+    expect(sleeps).toEqual([])
+  })
+
+  it('does not cache 429 or 5xx responses', async () => {
+    session()
+    let n = 0
+    handler = () => {
+      n++
+      if (n <= 2) return limited('1')
+      if (n === 3) return { status: 503, data: { status: 503 } }
+      return { status: 200, data: { items: [] }, headers: { etag: 'W/"x"' } }
+    }
+    await expect(get('/stocks', { page: 1 })).rejects.toMatchObject({ status: 429 })
+    await expect(get('/stocks', { page: 1 })).rejects.toMatchObject({ status: 503 })
+    expect(await get('/stocks', { page: 1 })).toEqual({ items: [] })
+    expect(await get('/stocks', { page: 1 })).toEqual({ items: [] })
+    expect(calls).toHaveLength(4)
   })
 })

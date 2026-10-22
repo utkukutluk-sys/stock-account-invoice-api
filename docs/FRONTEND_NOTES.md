@@ -9,8 +9,8 @@ Binding spec: `docs/CONTRACT.md` §8, §10. Both UIs have the same routes, Turki
 | ui-vue | `cd ui-vue && npm ci && npm run dev` → http://localhost:5173 (Vite proxies `/api` → `VITE_PROXY_TARGET`, default `http://localhost:5080`) | `docker build -t sa-ui-vue ui-vue` (node build → nginx:1.27; `/api/` proxied to `http://api:8080`; SPA fallback; `/healthz`) |
 | ui-nuxt | `cd ui-nuxt && npm ci && npm run dev` → http://localhost:3000 (SSR; Nitro route proxies `/api` → `NUXT_API_BASE`, default `http://localhost:5080`) | `npm run build && node .output/server/index.mjs`; `docker build -t sa-ui-nuxt ui-nuxt` (node:24-alpine runtime, port 3000, `NUXT_API_BASE=http://api:8080`) |
 
-Scripts: ui-vue `npm run build` (vue-tsc + vite), `npm test` (Vitest, 74 tests), `npm run lint` (ESLint + vue-tsc).
-ui-nuxt `npm run build`, `npm test` (Vitest, 53 tests), `npx vue-tsc --build` (type check).
+Scripts: ui-vue `npm run build` (vue-tsc + vite), `npm test` (Vitest, 83 tests), `npm run lint` (ESLint + vue-tsc).
+ui-nuxt `npm run build`, `npm test` (Vitest, 66 tests), `npx vue-tsc --build` (type check).
 
 ## Structure
 
@@ -68,9 +68,52 @@ PrimeVue 4.5 (Aura, emerald primary, `.app-dark` dark mode toggle), PrimeFlex 4,
 - The theme preference is stored in localStorage `sa_theme` in ui-vue and in the cookie `sa_theme` in ui-nuxt, so SSR renders without a theme flash. It is a UI preference only, not auth data.
 - `npm audit` reports high-severity issues in dev-only lint tooling (braces via @vue/eslint-config-typescript). None are in runtime dependencies.
 
+## Production readiness
+
+**Proxies and the client IP.** The API rate-limits per client IP and reads X-Forwarded-For.
+- ui-vue nginx sets `X-Forwarded-For $proxy_add_x_forwarded_for`, `X-Real-IP $remote_addr` and `X-Forwarded-Proto $scheme`.
+- In ui-nuxt, both the Nitro `/api` proxy and the SSR API calls append the client IP to the existing chain (`forwardedFor()` in `server/utils/ssrAuth.ts`) and set `X-Real-IP` and `X-Forwarded-Proto`.
+- Verified against the compose stack: the API logs the Docker host gateway IP (the real client), not the proxy container IP (.5/.6), and a spoofed left-most XFF value is ignored.
+
+**Security headers.** Both UIs send:
+- CSP: `default-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `img-src` and `font-src` from `'self' data:`, `connect-src 'self'`.
+- `style-src 'self' 'unsafe-inline'`, because PrimeVue styled mode injects `<style>` tags.
+- `script-src 'self'` in ui-vue. In ui-nuxt it is `'self' 'unsafe-inline'`, because Nuxt inlines its bootstrap/config script.
+- `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`.
+- ui-vue: `server_tokens off`; the headers come from `security-headers.conf`, included in every location because nginx does not inherit `add_header`.
+- ui-nuxt: the headers come from `$production.routeRules`, and `x-powered-by` is removed by `server/plugins/security.ts`. They are not applied in dev, because Vite HMR needs eval and websocket sources.
+
+**Caching and compression.**
+- Hashed assets: `Cache-Control: public, max-age=31536000, immutable`. `index.html` and SPA routes: `no-cache`.
+- Compression: gzip in nginx (the stock nginx:alpine image has no brotli module). Nitro serves pre-compressed gzip and brotli (`compressPublicAssets`).
+
+**429 handling (both UIs).**
+- `ApiError.retryAfterSeconds` holds Retry-After, as delta-seconds or parsed from an HTTP date.
+- `displayMessage` returns "Çok fazla istek gönderildi, X sn sonra tekrar deneyin.", or "… lütfen biraz sonra tekrar deneyin." when the header is missing.
+- An idempotent GET outside `/auth/*` is retried once after Retry-After, at most 10 s; a missing header means 1 s.
+- Mutations and login are never retried. The login page shows the 429 message.
+- 429 and 5xx responses are never cached, because the cache stores only successful responses.
+- Unit tests: ui-vue `http.spec.ts` + `rateLimit.spec.ts`; ui-nuxt `utils/__tests__/http.spec.ts` + `rateLimit.spec.ts`.
+
+**Global error boundary.**
+- ui-vue: `app.config.errorHandler` shows a friendly Turkish toast, with the console used only in dev. `router.onError` reloads once when a lazy chunk is missing after a deploy.
+- ui-nuxt: `plugins/error-handler.client.ts` (`vue:error`, `app:error`) and `app/error.vue`, a Turkish 404/500 page that shows technical details only in dev.
+- In production, `server/plugins/sanitize-error.ts` and `plugins/sanitize-error.server.ts` replace 5xx messages and stacks with "Server Error" in the HTML payload and in JSON error responses. The original error is logged on the server only.
+- Verified with a temporary page that threw during SSR (removed afterwards): HTML 500 "Beklenmeyen Bir Hata Oluştu", JSON `{"message":"Server Error"}`, no message or stack in either.
+
+**Fail-fast config (ui-nuxt).**
+- `server/plugins/validate-config.ts` makes the production server exit with code 1 and a clear message when `NUXT_API_BASE` is missing, is not an absolute http(s) origin, or ends with `/api`.
+- The image no longer bakes in a default; compose sets `NUXT_API_BASE=http://api:8080`.
+
+**Docker images.**
+- Both Dockerfiles run the unit tests during the build.
+- ui-vue: nginx healthcheck on `/healthz`.
+- ui-nuxt: healthcheck on `/login`; the runtime runs as the `node` user.
+- Both images were built and recreated in the running stack with `docker compose up -d --no-deps ui-vue ui-nuxt`. Both are healthy, and the browser smoke test passed 16/16 on each container with no CSP violations.
+
 ## Requests to Backend
 - None blocking. Both UIs were verified end to end against the real API on 5080 on 2026-10-22 (16/16 smoke steps each).
 - The UIs already follow BACKEND_NOTES §4: the `X-Company-Id` header, a JSON body on refresh/logout, and no `quantity` sort on ActTrans.
 
 ## Not verified
-- Docker images were not built: there is no Docker CLI on this machine. The Dockerfiles and nginx.conf were written to match the contract.
+- Nuxt logs a hydration-mismatch warning on some pages (cosmetic; the date or theme differs between server and client).

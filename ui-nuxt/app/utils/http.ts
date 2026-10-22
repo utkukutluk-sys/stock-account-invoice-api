@@ -3,6 +3,10 @@
 // - Browser: targets same-origin `/api` with the client HTTP cache, proactive + single-flight refresh on 401.
 import { toApiError } from './errors'
 import { HttpCache, buildCacheKey, resolveTtl, sortedQuery } from './cache'
+import { autoRetryDelayMs, sleep } from './rateLimit'
+
+/** Overridable in tests. */
+export const httpTiming = { sleep }
 
 export interface ApiClientOptions {
   baseURL: string
@@ -40,6 +44,8 @@ interface RawOptions {
   headers?: Record<string, string>
   companyId?: number | null
   retry?: boolean
+  /** Internal: already retried after a 429. */
+  retried429?: boolean
 }
 
 const PROACTIVE_REFRESH_MS = 60_000
@@ -92,6 +98,14 @@ export function createApiClient(o: ApiClientOptions) {
       return { status: res.status, data: res._data as T, etag: res.headers.get('etag') }
     } catch (err) {
       const e = toApiError(err)
+      // 429: retry an idempotent GET once after Retry-After (never /auth/*, so login is never retried).
+      if (e.status === 429 && method === 'GET' && !opts.retried429 && !isAuthUrl(url)) {
+        const delay = autoRetryDelayMs(e.retryAfterSeconds)
+        if (delay !== null) {
+          await httpTiming.sleep(delay)
+          return raw<T>(method, url, { ...opts, retried429: true })
+        }
+      }
       if (e.status === 401 && opts.retry !== false && !isAuthUrl(url) && o.refresh) {
         try {
           await o.refresh()

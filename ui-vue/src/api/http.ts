@@ -3,11 +3,17 @@
 import axios, { AxiosHeaders, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { ApiError, toApiError } from './errors'
 import { HttpCache, buildCacheKey, resolveTtl, sortedQuery } from './cache'
+import { autoRetryDelayMs, sleep } from './rateLimit'
+
+/** Overridable in tests. */
+export const httpTiming = { sleep }
 
 declare module 'axios' {
   interface AxiosRequestConfig {
     /** Internal: request was already retried after a refresh. */
     _retry?: boolean
+    /** Internal: request was already retried after a 429. */
+    _retry429?: boolean
     /** Explicit X-Company-Id for this request (admin). `null` = send no header. */
     companyId?: number | null
   }
@@ -89,6 +95,21 @@ export function createHttp(): AxiosInstance {
     async (error: unknown) => {
       const e = error as { config?: InternalAxiosRequestConfig; response?: { status: number } }
       const config = e.config
+      // 429: retry an idempotent GET once after Retry-After (never /auth/*, so login is never retried).
+      if (
+        e.response?.status === 429 &&
+        config &&
+        !config._retry429 &&
+        (config.method ?? 'get').toLowerCase() === 'get' &&
+        !isAuthUrl(config.url)
+      ) {
+        const delay = autoRetryDelayMs(toApiError(error).retryAfterSeconds)
+        if (delay !== null) {
+          config._retry429 = true
+          await httpTiming.sleep(delay)
+          return instance.request(config)
+        }
+      }
       if (e.response?.status === 401 && config && !config._retry && !isAuthUrl(config.url)) {
         config._retry = true
         let token: string

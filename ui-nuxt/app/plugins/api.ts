@@ -2,6 +2,7 @@
 // browser → same-origin '/api' with the client HTTP cache and refresh handling.
 import { createApiClient, httpCache, type ApiClient } from '@/utils/http'
 import { useAuthStore } from '@/stores/auth'
+import { forwardedFor } from '~~/server/utils/ssrAuth'
 
 export default defineNuxtPlugin({
   name: 'api',
@@ -22,10 +23,16 @@ export default defineNuxtPlugin({
     if (import.meta.server) {
       const event = useRequestEvent()
       const { apiBase } = useRuntimeConfig()
-      const ip = event ? event.node.req.socket?.remoteAddress : undefined
+      // SSR calls the API directly: forward the browser's address chain for rate limiting/logging.
+      const xff = event ? forwardedFor(event) : undefined
+      const proto = event?.node.req.headers['x-forwarded-proto']
       return {
         provide: {
-          api: createApiClient({ ...common, baseURL: `${apiBase}/api`, cache: null, headers: ip ? { 'x-forwarded-for': ip } : {} }),
+          api: createApiClient({ ...common, baseURL: `${apiBase}/api`, cache: null, headers: {
+            ...(xff ? { 'x-forwarded-for': xff } : {}),
+            ...(typeof proto === 'string' ? { 'x-forwarded-proto': proto } : {}),
+          },
+        }),
         },
       }
     }

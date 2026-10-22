@@ -37,7 +37,8 @@ async function submit() {
     await router.replace(postLoginTarget(route.query.redirect, auth.homePath))
   } catch (err) {
     const e = toApiError(err)
-    error.value = e.detail || (e.status === 401 ? 'E-posta veya şifre hatalı.' : e.displayMessage)
+    // 401: credential problem (server detail); 429 and others: generic display message (no retry for login).
+    error.value = e.status === 401 ? e.detail || 'E-posta veya şifre hatalı.' : e.displayMessage
   } finally {
     submitting.value = false
   }

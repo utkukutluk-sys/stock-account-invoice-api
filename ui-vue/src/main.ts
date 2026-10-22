@@ -63,5 +63,24 @@ configureHttp({
   },
 })
 
+// Global error boundary: friendly Turkish message; technical details only in the console during development.
+app.config.errorHandler = (err, _instance, info) => {
+  if (import.meta.env.DEV) console.error('[app error]', info, err)
+  app.config.globalProperties.$toast?.add({
+    severity: 'error',
+    summary: 'Hata',
+    detail: 'Beklenmeyen bir hata oluştu. Lütfen sayfayı yenileyip tekrar deneyin.',
+    life: 6000,
+  })
+}
+// A lazily loaded page chunk that vanished after a redeploy: reload the target URL once.
+router.onError((err, to) => {
+  if (/Failed to fetch dynamically imported module|Importing a module script failed/i.test(String(err?.message))) {
+    window.location.assign(to.fullPath)
+  } else if (import.meta.env.DEV) {
+    console.error('[router error]', err)
+  }
+})
+
 app.use(router)
 void router.isReady().then(() => app.mount('#app'))

@@ -44,6 +44,30 @@ export default defineNuxtConfig({
 
   devServer: { port: 3000 },
 
+  // Production hardening (not in dev: Vite HMR needs eval/websocket sources).
+  $production: {
+    routeRules: {
+      '/**': {
+        headers: {
+          // Nuxt inlines its runtime config/payload bootstrap script and PrimeVue injects <style> tags,
+          // so 'unsafe-inline' is required for script/style; everything else is same-origin only.
+          'Content-Security-Policy':
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'strict-origin-when-cross-origin',
+          'X-Frame-Options': 'DENY',
+          'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+          'Cross-Origin-Opener-Policy': 'same-origin',
+        },
+      },
+    },
+  },
+
+  nitro: {
+    // Pre-compressed (gzip + brotli) public assets; /_nuxt/* hashed assets are served immutable by Nitro.
+    compressPublicAssets: { gzip: true, brotli: true },
+  },
+
   vite: {
     optimizeDeps: {
       include: ['primevue/usetoast', 'primevue/useconfirm'],

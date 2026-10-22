@@ -20,7 +20,8 @@ export interface SsrAuthResult {
 
 export const REFRESH_COOKIE = 'sa_refresh'
 
-function forwardedFor(event: H3Event): string | undefined {
+/** Existing X-Forwarded-For chain + the direct client IP (the API rate-limits per client IP). */
+export function forwardedFor(event: H3Event): string | undefined {
   const prior = event.node.req.headers['x-forwarded-for']
   const ip = getRequestIP(event)
   const chain = [Array.isArray(prior) ? prior.join(', ') : prior, ip].filter(Boolean).join(', ')
