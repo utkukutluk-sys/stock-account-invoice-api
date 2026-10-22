@@ -72,8 +72,7 @@ test.describe('auth & role-based menu', () => {
     await expect(page.getByTestId('page-title')).toHaveText('Sayfa Bulunamadı');
   });
 
-  test('page stays responsive after logout following a client-side login (BUG-4 on Nuxt)', async ({ page }, testInfo) => {
-    test.fail(isNuxt(testInfo), 'BUG-4 (Frontend/ui-nuxt): main thread blocked after logout; remove when fixed');
+  test('page stays responsive after logout following a client-side login (BUG-4 regression)', async ({ page }) => {
     await login(page, 'demo');
     await expect(page.getByTestId('page-title')).toHaveText('Gösterge Paneli');
     await page.getByTestId('logout-button').click();

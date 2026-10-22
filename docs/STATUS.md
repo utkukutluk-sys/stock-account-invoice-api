@@ -33,7 +33,7 @@ Notes: record deviations from CONTRACT, `REQUEST → <agent>: ...` for cross-are
 | FE-7 | Transactions pages | Frontend | Done | verified vs real API (smoke 16/16) |
 | FE-8 | Admin pages + company switcher | Frontend | Done | verified vs real API (smoke 16/16) |
 | FE-9 | Portal /my-account | Frontend | Done | verified vs real API (smoke 16/16) |
-| FE-10 | ui-nuxt port | Frontend | Done | Nuxt 4.6 SSR; SSR refresh + Set-Cookie passthrough, Nitro /api proxy, useAsyncData+getCachedData; uses $fetch (not axios); smoke 16/16 vs real API |
+| FE-10 | ui-nuxt port | Frontend | Done | Nuxt 4.6 SSR; SSR refresh + Set-Cookie passthrough, Nitro /api proxy, useAsyncData+getCachedData; uses $fetch (not axios); smoke 16/16 vs real API; BUG-4 fixed (layout no longer remounts page on logout) |
 | FE-11 | UI Dockerfiles | Frontend | Done | ui-vue nginx (SPA fallback, /api → api:8080), ui-nuxt node runtime; NOT built: no Docker CLI on this machine |
 | TS-1 | Unit tests | Test | Done | Written by Backend (B9); verified 90/90 green. |
 | TS-2 | Integration tests | Test | Done | 104 tests (102 pass, 2 skipped = open bugs), per-run StockAccountTests_{guid} on SQLEXPRESS, all 14 groups + concurrency/zero-total. See docs/TEST_REPORT.md. BUG → Backend: BUG-1 (Medium, /companies/current 403 for operator), BUG-2, BUG-3, BUG-5 (Low). |

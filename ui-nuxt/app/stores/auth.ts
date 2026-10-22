@@ -86,7 +86,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     clear()
     httpCache.clear()
-    useCookie('sa_company', { path: '/', sameSite: 'strict' }).value = null
+    // sa_company is cleared by the caller via the ui store (single useCookie instance).
   }
 
   function can(policy?: Policy): boolean {

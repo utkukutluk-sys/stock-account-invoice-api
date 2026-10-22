@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import CompanySwitcher from '@/components/CompanySwitcher.vue'
+import { shouldShowShell } from '@/lib/navigation'
 
 interface NavItem {
   to: string
@@ -20,7 +21,7 @@ const router = useRouter()
 const userPanel = ref()
 const hydrated = useState('hydrated', () => false)
 // Login and anonymous error pages render without the shell (same rule as ui-vue App.vue).
-const showShell = computed(() => auth.isAuthenticated && !router.currentRoute.value.meta.bare)
+const showShell = computed(() => shouldShowShell(router.currentRoute.value.meta, auth.isAuthenticated))
 
 const sections = computed(() => {
   const op = auth.isOperator
@@ -71,7 +72,7 @@ watch(
 
 async function logout() {
   await auth.logout()
-  ui.syncCompany()
+  ui.setCompany(null)
   await router.push('/login')
 }
 
