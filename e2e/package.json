@@ -1,0 +1,16 @@
+{
+  "name": "stockaccount-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:vue": "cross-env E2E_UI=vue playwright test --project=vue",
+    "test:nuxt": "cross-env E2E_UI=nuxt playwright test --project=nuxt",
+    "test:docker": "cross-env E2E_EXTERNAL=1 playwright test --project=vue --project=nuxt --grep @smoke",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "cross-env": "^10.1.0"
+  }
+}
