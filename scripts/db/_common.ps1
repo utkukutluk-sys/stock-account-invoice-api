@@ -367,3 +367,119 @@ function Test-Interactive {
     $argsLine = [Environment]::GetCommandLineArgs() -join ' '
     return -not [regex]::IsMatch($argsLine, '-noni', [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
 }
+
+# ---------------------------------------------------------------------------------------------------------------
+# API cache flush after a restore (BUG-9). The API caches stock/account DTOs and lists in Redis under the instance
+# prefix "sa:". After the database goes back in time, every one of those entries is stale and, because identity
+# values are rolled back too, a cached id could even be served for a different row. Only keys with the app prefix
+# are removed (SCAN + UNLINK in batches); FLUSHALL/FLUSHDB are never used.
+# Result: Status = Flushed | Unreachable | Failed, Deleted = number of keys removed, Message.
+# ---------------------------------------------------------------------------------------------------------------
+$script:CachePrefixPattern = '^[A-Za-z0-9_.-]{1,32}:$'
+$script:RedisHostPattern   = '^[A-Za-z0-9.-]{1,253}$'
+
+function Clear-AppCacheDocker {
+    param([Parameter(Mandatory)]$Ctx, [string]$Prefix = 'sa:', [string]$RedisService = 'redis')
+    Assert-Pattern $Prefix $script:CachePrefixPattern 'cache prefix'
+    Assert-Pattern $RedisService $script:ServicePattern 'redis compose service'
+
+    $ps = Invoke-Native $Ctx.Docker ($Ctx.ComposeArgs + @('ps', '--status', 'running', '--services'))
+    if ($ps.ExitCode -ne 0 -or -not ($ps.Lines | Where-Object { $_.Trim() -ceq $RedisService })) {
+        return [pscustomobject]@{ Status = 'Unreachable'; Deleted = 0; Message = "compose service '$RedisService' is not running" }
+    }
+    # Pattern is validated above; it is the only interpolated value. No double quotes (PS 5.1 native-arg quoting).
+    $pattern = $Prefix + '*'
+    $sh = 'n=$(redis-cli --scan --pattern ''{PATTERN}'' --count 1000 | wc -l) && ' +
+          'redis-cli --scan --pattern ''{PATTERN}'' --count 1000 | tr ''\n'' ''\000'' | xargs -0 -r -n 500 redis-cli unlink > /dev/null && ' +
+          'echo FLUSHED=$n && echo REMAINING=$(redis-cli --scan --pattern ''{PATTERN}'' | wc -l)'
+    $sh = $sh.Replace('{PATTERN}', $pattern)
+    $r = Invoke-Native $Ctx.Docker ($Ctx.ComposeArgs + @('exec', '-T', $RedisService, 'sh', '-c', $sh))
+    $kv = ConvertFrom-KeyValueLines $r.Lines
+    if ($r.ExitCode -ne 0 -or -not $kv.Contains('FLUSHED')) {
+        return [pscustomobject]@{ Status = 'Failed'; Deleted = 0; Message = ($r.Lines -join ' ') }
+    }
+    return [pscustomobject]@{ Status = 'Flushed'; Deleted = [int]$kv['FLUSHED']; Message = "remaining $($kv['REMAINING'])" }
+}
+
+# Minimal RESP client (no redis-cli needed on Windows). Optional password: $env:REDIS_PASSWORD.
+function Clear-AppCacheTcp {
+    param([string]$RedisHost = 'localhost', [int]$Port = 6379, [string]$Prefix = 'sa:', [int]$TimeoutMs = 2000)
+    Assert-Pattern $RedisHost $script:RedisHostPattern 'redis host'
+    Assert-Pattern $Prefix $script:CachePrefixPattern 'cache prefix'
+    if ($Port -lt 1 -or $Port -gt 65535) { throw "Invalid redis port $Port" }
+
+    $client = New-Object Net.Sockets.TcpClient
+    try {
+        try {
+            if (-not $client.ConnectAsync($RedisHost, $Port).Wait($TimeoutMs)) { throw 'connect timeout' }
+        }
+        catch {
+            return [pscustomobject]@{ Status = 'Unreachable'; Deleted = 0; Message = "Redis ${RedisHost}:$Port not reachable" }
+        }
+        $client.ReceiveTimeout = 10000; $client.SendTimeout = 10000
+        $stream = New-Object IO.BufferedStream($client.GetStream())
+        $utf8 = New-Object Text.UTF8Encoding($false)
+
+        $send = {
+            param([string[]]$parts)
+            $sb = New-Object Text.StringBuilder
+            [void]$sb.Append('*').Append($parts.Count).Append("`r`n")
+            foreach ($p in $parts) { [void]$sb.Append('$').Append($utf8.GetByteCount($p)).Append("`r`n").Append($p).Append("`r`n") }
+            $bytes = $utf8.GetBytes($sb.ToString())
+            $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+        }
+        $readLine = {
+            $buf = New-Object IO.MemoryStream
+            while ($true) {
+                $b = $stream.ReadByte()
+                if ($b -lt 0) { throw 'connection closed by Redis' }
+                if ($b -eq 13) { [void]$stream.ReadByte(); break }
+                $buf.WriteByte([byte]$b)
+            }
+            $utf8.GetString($buf.ToArray())
+        }
+        $read = $null
+        $read = {
+            $line = & $readLine
+            $type = $line.Substring(0, 1); $body = $line.Substring(1)
+            switch ($type) {
+                '+' { return $body }
+                '-' { throw "Redis error: $body" }
+                ':' { return [long]$body }
+                '$' {
+                    $len = [int]$body
+                    if ($len -lt 0) { return $null }
+                    $data = New-Object byte[] ($len + 2); $off = 0
+                    while ($off -lt $data.Length) { $n = $stream.Read($data, $off, $data.Length - $off); if ($n -le 0) { throw 'connection closed' }; $off += $n }
+                    return $utf8.GetString($data, 0, $len)
+                }
+                '*' {
+                    $count = [int]$body
+                    $items = New-Object Collections.ArrayList
+                    for ($i = 0; $i -lt $count; $i++) { [void]$items.Add((& $read)) }
+                    return , $items.ToArray()
+                }
+                default { throw "Unexpected Redis reply '$line'" }
+            }
+        }
+
+        if ($env:REDIS_PASSWORD) { & $send @('AUTH', $env:REDIS_PASSWORD); [void](& $read) }
+        $cursor = '0'; $deleted = 0
+        do {
+            & $send @('SCAN', $cursor, 'MATCH', ($Prefix + '*'), 'COUNT', '1000')
+            $reply = & $read
+            $cursor = [string]$reply[0]
+            $keys = @($reply[1])
+            for ($i = 0; $i -lt $keys.Count; $i += 500) {
+                $batch = @($keys[$i..([Math]::Min($i + 499, $keys.Count - 1))])
+                & $send (@('UNLINK') + $batch)
+                $deleted += [int](& $read)
+            }
+        } while ($cursor -ne '0')
+        return [pscustomobject]@{ Status = 'Flushed'; Deleted = $deleted; Message = "${RedisHost}:$Port" }
+    }
+    catch {
+        return [pscustomobject]@{ Status = 'Failed'; Deleted = 0; Message = $_.Exception.Message }
+    }
+    finally { $client.Close() }
+}

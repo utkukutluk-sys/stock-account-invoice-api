@@ -14,7 +14,14 @@
        On failure the database is brought back ONLINE / MULTI_USER before the error is reported.
     5. Verify: DBCC CHECKDB WITH NO_INFOMSGS, ONLINE + MULTI_USER, migration head and per-table row counts
        equal to the manifest.
-  Exit code: 0 success, 1 failure, 2 not confirmed.
+    6. Flush the API cache (BUG-9): every Redis key with the app prefix (default "sa:") is removed with
+       SCAN + UNLINK in batches (never FLUSHALL). docker: via `docker compose exec redis redis-cli`.
+       local: -RedisHost/-RedisPort (default localhost:6379, e.g. the sa-redis container) over a small RESP client.
+       If Redis is not running/reachable, a warning says to restart the API (its in-memory fallback cache cannot
+       be flushed from outside). Idempotent: running it again (e.g. rollback.ps1's own flush) just deletes 0 keys.
+       -SkipCacheFlush skips this step (only when the caller flushes itself).
+  Exit code: 0 success, 1 failure, 2 not confirmed, 3 database restored and verified but the cache flush FAILED
+  (Redis reachable but returned an error): restart the API or flush sa:* by hand before serving traffic.
   The API keeps pooled connections that were killed by the restore; SqlClient discards them on first use and
   EF retries, but restarting the API after a restore is recommended (rollback.ps1 does).
   Schema rollback = restoring the pre-deploy backup; there are no EF down-migrations in this project.
@@ -36,7 +43,12 @@ param(
     [string]$BackupDir,
     [string]$ServerInstance = '.\SQLEXPRESS',
     [string]$ComposeFile,
-    [string]$Service = 'mssql'
+    [string]$Service = 'mssql',
+    [switch]$SkipCacheFlush,
+    [string]$CachePrefix = 'sa:',
+    [string]$RedisService = 'redis',
+    [string]$RedisHost = 'localhost',
+    [ValidateRange(1, 65535)][int]$RedisPort = 6379
 )
 
 $ErrorActionPreference = 'Stop'
@@ -198,6 +210,25 @@ END CATCH
     $totalRows = ($after.RowCounts.Values | Measure-Object -Sum).Sum
     Write-Step "RESTORE OK: [$Database] ONLINE/MULTI_USER, CHECKDB clean, migration head $($after.MigrationHead), $tables tables / $totalRows rows match the manifest"
     $exitCode = 0
+
+    # ---- 6. API cache flush (BUG-9) ----
+    if ($SkipCacheFlush) {
+        Write-Step "Cache flush skipped (-SkipCacheFlush): the caller must remove '$CachePrefix*' keys or restart the API."
+    }
+    else {
+        $flush = if ($Target -eq 'docker') { Clear-AppCacheDocker -Ctx $ctx -Prefix $CachePrefix -RedisService $RedisService }
+                 else { Clear-AppCacheTcp -RedisHost $RedisHost -Port $RedisPort -Prefix $CachePrefix }
+        switch ($flush.Status) {
+            'Flushed' { Write-Step "API cache flushed: $($flush.Deleted) '$CachePrefix*' key(s) removed ($($flush.Message))" }
+            'Unreachable' {
+                Write-Host "[db] WARNING: API cache NOT flushed - $($flush.Message). If the API was using Redis or its in-memory fallback, restart the API now; otherwise it serves pre-restore data until the cache TTL (10 min by id, 5 min lists)." -ForegroundColor Yellow
+            }
+            default {
+                Write-Host "[db] CACHE FLUSH FAILED after a successful restore: $($flush.Message). Restart the API or remove '$CachePrefix*' keys before serving traffic." -ForegroundColor Red
+                $exitCode = 3
+            }
+        }
+    }
 }
 catch {
     Write-Host "[db] RESTORE FAILED: $($_.Exception.Message)" -ForegroundColor Red
