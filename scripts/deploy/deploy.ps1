@@ -21,7 +21,10 @@ param(
     [int]$ReadyTimeoutSeconds = 240,
     [string]$HealthUrl = 'http://localhost:5080/health/ready',
     [switch]$SkipBackup,
-    [switch]$NoAutoRollback
+    [switch]$NoAutoRollback,
+    # Extra compose file merged over docker-compose.yml for THIS deploy only (e.g. scripts/deploy/drills/crash-api.override.yml
+    # to drill the automatic rollback with a container that really crashes). The rollback always uses the plain compose file.
+    [string]$ComposeOverride
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +32,12 @@ $ErrorActionPreference = 'Stop'
 
 if ($Version -cnotmatch $script:VersionPattern) { throw "Invalid version '$Version' (expected e.g. 1.2.0)." }
 if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot '.env'))) { throw '.env not found: run scripts/deploy/new-secrets.ps1 first.' }
+
+if ($ComposeOverride) {
+    $overridePath = (Resolve-Path -LiteralPath (Join-Path $script:RepoRoot $ComposeOverride) -ErrorAction Stop).Path
+    $env:COMPOSE_FILE = (Join-Path $script:RepoRoot 'docker-compose.yml') + [IO.Path]::PathSeparator + $overridePath
+    Write-Deploy "compose override for this deploy: $ComposeOverride" 'Yellow'
+}
 
 $history = Read-History
 $previous = $history.current
@@ -88,6 +97,7 @@ catch {
     Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'failed'; previous = $previous; preDeployBackup = $backupFile; error = $_.Exception.Message }
     Save-History $history
 
+    Remove-Item Env:COMPOSE_FILE -ErrorAction SilentlyContinue # rollback must use the plain compose file
     if (-not $NoAutoRollback -and $previous -and $previous -cne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
         Write-Deploy "automatic rollback to $previous" 'Yellow'
         $rollbackArgs = @{ Version = $previous; From = $Version; Reason ="auto: deploy of $Version failed" }

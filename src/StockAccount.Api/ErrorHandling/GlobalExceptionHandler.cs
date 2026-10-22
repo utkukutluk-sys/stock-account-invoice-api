@@ -49,7 +49,7 @@ public sealed class GlobalExceptionHandler(IHostEnvironment environment, ILogger
         AppException a => (a.StatusCode, a.Code, a.Message, null),
         DomainException d => (ErrorCodes.StatusFor(d.Code), d.Code, d.Message, null),
         DbUpdateConcurrencyException => (409, ErrorCodes.ConcurrencyConflict, "Kayıt başka bir kullanıcı tarafından değiştirildi. Lütfen sayfayı yenileyip tekrar deneyin.", null),
-        BadHttpRequestException b => (b.StatusCode, ErrorCodes.ValidationFailed, b.Message, null),
+        BadHttpRequestException b => (b.StatusCode, b.StatusCode == 415 ? ErrorCodes.UnsupportedMediaType : ErrorCodes.ValidationFailed, b.Message, null),
         _ => (500, ErrorCodes.InternalError, "Beklenmeyen bir hata oluştu.", null),
     };
 

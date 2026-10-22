@@ -1,0 +1,9 @@
+# DRILL ONLY - never use for a real release.
+# Makes the new api container exit with code 2 at startup (Jwt:Key too short -> fail-fast config validation), so the
+# automatic rollback of deploy.ps1 is exercised against a genuinely crashing container (restart loop, never ready):
+#   ./scripts/deploy/deploy.ps1 -Version 9.9.9-drill -ComposeOverride scripts/deploy/drills/crash-api.override.yml -ReadyTimeoutSeconds 60
+# db-migrate is not affected; the rollback uses the plain docker-compose.yml again.
+services:
+  api:
+    environment:
+      Jwt__Key: "too-short"

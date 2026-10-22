@@ -127,7 +127,7 @@ public sealed class ProductionReadinessTests(ApiFixture fx)
         }
 
         await ApiSession.ExpectProblemAsync(await op.GetAsync("/api/does-not-exist"), HttpStatusCode.NotFound, "NOT_FOUND");
-        await ApiSession.ExpectProblemAsync(await op.DeleteAsync("/api/dashboard/summary"), HttpStatusCode.MethodNotAllowed, "NOT_FOUND");
+        await ApiSession.ExpectProblemAsync(await op.DeleteAsync("/api/dashboard/summary"), HttpStatusCode.MethodNotAllowed, "METHOD_NOT_ALLOWED");
 
         using var swagger = await op.Client.GetAsync("/swagger/v1/swagger.json");
         Assert.Equal(HttpStatusCode.NotFound, swagger.StatusCode); // Swagger is off in Production

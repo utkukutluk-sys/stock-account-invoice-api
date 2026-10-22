@@ -23,6 +23,25 @@ public static class ConfigurationValidator
         public bool IsValid => Errors.Count == 0;
     }
 
+    /// <summary>RFC 1918 / loopback / unique-local / link-local ranges a trusted proxy network may lie in.</summary>
+    private static readonly IPNetwork[] PrivateRanges =
+    [
+        IPNetwork.Parse("10.0.0.0/8"),
+        IPNetwork.Parse("172.16.0.0/12"),
+        IPNetwork.Parse("192.168.0.0/16"),
+        IPNetwork.Parse("127.0.0.0/8"),
+        IPNetwork.Parse("169.254.0.0/16"),
+        IPNetwork.Parse("::1/128"),
+        IPNetwork.Parse("fc00::/7"),
+        IPNetwork.Parse("fe80::/10"),
+    ];
+
+    /// <summary>True when the whole network is contained in one private/loopback range.</summary>
+    public static bool IsPrivateOrLoopback(IPNetwork network) =>
+        PrivateRanges.Any(r => r.BaseAddress.AddressFamily == network.BaseAddress.AddressFamily
+            && network.PrefixLength >= r.PrefixLength
+            && r.Contains(network.BaseAddress));
+
     private static bool UsesSaLogin(string connectionString)
     {
         try
@@ -172,13 +191,14 @@ public static class ConfigurationValidator
         var fh = config.GetSection(ForwardedHeadersSettings.SectionName).Get<ForwardedHeadersSettings>() ?? new ForwardedHeadersSettings();
         foreach (var network in fh.KnownNetworks)
         {
-            if (!IPNetwork.TryParse(network, out _))
+            if (!IPNetwork.TryParse(network, out var parsed))
             {
                 errors.Add($"ForwardedHeaders:KnownNetworks contains an invalid CIDR '{network}'");
             }
-            else if (strict && network is "0.0.0.0/0" or "::/0")
+            else if (strict && !IsPrivateOrLoopback(parsed))
             {
-                errors.Add("ForwardedHeaders:KnownNetworks must not trust every address in a production environment");
+                // Coverage-based (BUG-11): 0.0.0.0/0, 0.0.0.0/1 + 128.0.0.0/1, 8.0.0.0/8 … are all rejected.
+                errors.Add($"ForwardedHeaders:KnownNetworks '{network}' is not inside a private/loopback range; trust explicit proxy IPs (KnownProxies) instead");
             }
         }
 

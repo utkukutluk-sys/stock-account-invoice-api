@@ -74,6 +74,7 @@ try
         .AddControllers(o =>
         {
             o.Filters.Add<ValidationFilter>();
+            o.Filters.Add(new ProblemDetailsContentTypeFilter()); // instance so its IOrderedFilter.Order (after [Produces]) is used
             o.Conventions.Add(new SuccessResponseTypeConvention());
         })
         .AddJsonOptions(o =>

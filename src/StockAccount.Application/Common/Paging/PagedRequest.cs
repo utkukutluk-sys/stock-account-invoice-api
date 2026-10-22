@@ -7,6 +7,9 @@ public class PagedRequest
 {
     public const int MaxPageSize = 100;
 
+    /// <summary>Upper bound for <see cref="Page"/> so (page - 1) * pageSize always fits in an int OFFSET (BUG-8).</summary>
+    public const int MaxPage = 1_000_000;
+
     /// <summary>1-based page number (default 1).</summary>
     public int Page { get; set; } = 1;
 
@@ -29,7 +32,8 @@ public abstract class PagedRequestValidator<T> : AbstractValidator<T>
 {
     protected PagedRequestValidator()
     {
-        RuleFor(x => x.Page).GreaterThanOrEqualTo(1).WithMessage("Sayfa numarası 1 veya daha büyük olmalıdır.");
+        RuleFor(x => x.Page).InclusiveBetween(1, PagedRequest.MaxPage)
+            .WithMessage($"Sayfa numarası 1 ile {PagedRequest.MaxPage:N0} arasında olmalıdır.");
         RuleFor(x => x.PageSize).InclusiveBetween(1, PagedRequest.MaxPageSize)
             .WithMessage($"Sayfa boyutu 1 ile {PagedRequest.MaxPageSize} arasında olmalıdır.");
         RuleFor(x => x.Q).MaximumLength(200).WithMessage("Arama metni en fazla 200 karakter olabilir.");

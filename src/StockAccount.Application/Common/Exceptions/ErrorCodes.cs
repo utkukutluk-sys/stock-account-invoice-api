@@ -36,6 +36,8 @@ public static class ErrorCodes
     public const string InvalidReference = "INVALID_REFERENCE";
 
     public const string RateLimited = "RATE_LIMITED";
+    public const string MethodNotAllowed = "METHOD_NOT_ALLOWED";
+    public const string UnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE";
 
     public const string InternalError = "INTERNAL_ERROR";
 
@@ -51,6 +53,8 @@ public static class ErrorCodes
         [InsufficientStock] = 422, [InvoiceHasNoLines] = 422, [InactiveStock] = 422, [InactiveAccount] = 422,
         [AccountTypeMismatch] = 422, [InvalidReference] = 422,
         [RateLimited] = 429,
+        [MethodNotAllowed] = 405,
+        [UnsupportedMediaType] = 415,
         [InternalError] = 500,
     };
 

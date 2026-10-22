@@ -3,7 +3,11 @@
 #   docker compose up --build -d            (local, images tagged :local)
 #   ./scripts/deploy/deploy.ps1 -Version 1.2.0   (versioned deploy with pre-deploy backup + auto rollback)
 # Missing JWT_KEY / MSSQL_SA_PASSWORD make "docker compose" fail immediately.
-# Host ports: API 5080, ui-vue 5173, ui-nuxt 3000, SQL Server 14333, Redis 6379
+# Host ports: ui-vue 5173, ui-nuxt 3000 (public entry points); API 5080, SQL Server 14333, Redis 6379 are bound to
+# 127.0.0.1 only (local tools/Swagger/newman). Production: set API_BIND= nothing public, or drop the mapping entirely —
+# browsers reach the API through the UI proxies on the internal network.
+# Networks: "default" (edge) = api + ui proxies with FIXED proxy IPs; "backend" = mssql, redis, db-migrate, api.
+# The API trusts X-Forwarded-For only from 172.30.0.10 (ui-vue) and 172.30.0.11 (ui-nuxt) (BUG-7).
 # (stop a local dev Redis container such as "sa-redis" first, it also binds 6379).
 name: stockaccount
 
@@ -16,7 +20,8 @@ services:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required - run scripts/deploy/new-secrets.ps1}
       MSSQL_PID: Developer
     ports:
-      - "14333:1433"
+      - "127.0.0.1:14333:1433"
+    networks: [backend]
     volumes:
       - mssql-data:/var/opt/mssql
       # Backups written by scripts/db/backup.ps1 -Target docker land in ./backups on the host.
@@ -33,7 +38,8 @@ services:
     # Pinned: Redis 7.4.11 (alpine).
     image: redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    networks: [backend]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -65,6 +71,7 @@ services:
     depends_on:
       mssql:
         condition: service_healthy
+    networks: [backend]
     restart: "no"
 
   api:
@@ -83,8 +90,13 @@ services:
       Database__MigrateOnStartup: "false"
       Database__VerifySchemaOnStartup: "true"
       Database__Seed: "true"
+      # Only the two UI proxy containers may set X-Forwarded-For; everyone else is rate limited by its TCP peer IP.
+      ForwardedHeaders__KnownProxies__0: 172.30.0.10
+      ForwardedHeaders__KnownProxies__1: 172.30.0.11
+      ForwardedHeaders__ForwardLimit: "1"
     ports:
-      - "5080:8080"
+      - "${API_BIND:-127.0.0.1}:5080:8080"
+    networks: [default, backend]
     depends_on:
       db-migrate:
         condition: service_completed_successfully
@@ -107,6 +119,9 @@ services:
     image: stockaccount-ui-vue:${APP_VERSION:-local}
     ports:
       - "5173:80"
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     depends_on:
       - api
     restart: unless-stopped
@@ -119,9 +134,21 @@ services:
       NUXT_API_BASE: http://api:8080
     ports:
       - "3000:3000"
+    networks:
+      default:
+        ipv4_address: 172.30.0.11
     depends_on:
       - api
     restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
+          ip_range: 172.30.0.128/25   # dynamic addresses; .10/.11 are reserved for the UI proxies
+  backend: {}
 
 volumes:
   mssql-data:
