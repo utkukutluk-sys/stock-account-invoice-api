@@ -24,7 +24,10 @@ param(
     [switch]$NoAutoRollback,
     # Extra compose file merged over docker-compose.yml for THIS deploy only (e.g. scripts/deploy/drills/crash-api.override.yml
     # to drill the automatic rollback with a container that really crashes). The rollback always uses the plain compose file.
-    [string]$ComposeOverride
+    [string]$ComposeOverride,
+    # For releases that change the compose topology (networks, fixed IPs): after the backup and the build, run
+    # "docker compose down --remove-orphans" (volumes are KEPT) before "up". A running stack blocks network recreation.
+    [switch]$RecreateStack
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,6 +81,10 @@ try {
     Save-History $history
 
     # ---- 4. up
+    if ($RecreateStack) {
+        Write-Deploy 'recreating the stack (compose down --remove-orphans, volumes kept)' 'Yellow'
+        Invoke-Docker @('compose', 'down', '--remove-orphans') | Out-Null
+    }
     Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
 
     # ---- 5. readiness

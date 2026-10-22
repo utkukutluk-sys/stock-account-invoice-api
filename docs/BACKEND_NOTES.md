@@ -271,3 +271,39 @@ Infrastructure Persistence (DB agent) + Identity (UserManager config, Turkish er
 - **Compatibility note.** Images built before 1.3.0 do not understand `--migrate-only`. To roll back to such a release, use
   that release's compose file (`git checkout <release> -- docker-compose.yml`). In general, keep the compose file versioned
   together with the release.
+
+### 7.7 Round-3 security fixes (commits 87a32b0 + follow-up)
+
+| Bug | Fix | Evidence |
+|---|---|---|
+| BUG-7 (High) spoofed `X-Forwarded-For` | See the details below the table. | `tests/prod-readiness/proxy-ip-check.sh` on 1.5.0: direct :5080 burst 100×401 + 429, then spoofed XFF 203.0.113.50/.51 → **429**, and 101 new spoofed IPs → **101×429** (was 101×401). Through ui-vue and ui-nuxt, a container client still gets its own bucket (401) and a spoofed XFF from the host → 429. Integration tests `Spoofed_x_forwarded_for_from_an_untrusted_peer_is_ignored…` / `…_from_a_known_proxy_selects_the_client_bucket`. |
+| BUG-8 page overflow | `page` must be within 1..1,000,000 (`PagedRequest.MaxPage`), so `(page-1)*pageSize` always fits in an int OFFSET. | `page=2147483647` → 400 `VALIDATION_FAILED` with `errors.page`. |
+| BUG-10 415 content type | `ProblemDetailsContentTypeFilter`, an always-run result filter ordered after `[Produces]`, forces `application/problem+json` on every ProblemDetails ObjectResult. New codes `UNSUPPORTED_MEDIA_TYPE` (415) and `METHOD_NOT_ALLOWED` (405); refresh/logout 415 uses the same code. | `POST /api/stocks` with text/plain → 415 `application/problem+json`, `code UNSUPPORTED_MEDIA_TYPE`. |
+| BUG-11 trust-all CIDR splits | Strict environments accept a `KnownNetworks` entry only when the whole network lies inside 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, ::1, fc00::/7 or fe80::/10. Explicit `KnownProxies` IPs stay allowed. | Production image with `0.0.0.0/1` + `128.0.0.0/1` → exit 2; `8.0.0.0/8` → exit 2. Tests also cover `172.0.0.0/8` and `::/1` + `8000::/1`. |
+
+**BUG-7 fix in detail.** The API now trusts `X-Forwarded-For` only from the two UI proxy containers. Everyone else is rate
+limited by their TCP peer address.
+- Compose `default` (edge) network: `172.30.0.0/24`, dynamic range `.128/25`.
+  - ui-vue has the fixed IP `172.30.0.10`, ui-nuxt `172.30.0.11`.
+  - These are the API's only `ForwardedHeaders:KnownProxies`, with `ForwardLimit=1`. nginx and Nitro append the real peer,
+    so a client-supplied XFF can never become the effective client IP.
+- `backend` network: mssql, redis, db-migrate and api.
+- The Docker profile no longer trusts all private ranges.
+- Host ports for API, SQL and Redis are bound to `127.0.0.1` and `[::1]` only (`API_BIND` overrides the IPv4 bind).
+  Production: drop the API mapping; browsers use the UI proxies.
+
+**Deploy tooling.**
+- `deploy.ps1 -RecreateStack` is for releases that change the compose topology (networks, fixed IPs). After the backup
+  and the build it runs `compose down --remove-orphans` (volumes kept), then `up`.
+  - It was needed once, for 1.5.0. A plain deploy failed with "network has active endpoints".
+  - The automatic rollback then tried a restore while mssql was being recreated, and failed.
+  - Recovery: the DB stayed ONLINE with unchanged data, verified via 127.0.0.1. The redeploy with `-RecreateStack`
+    succeeded in 22 s.
+- `deploy.ps1 -ComposeOverride <file>` merges an extra compose file for that deploy only. The automatic rollback clears
+  it again.
+  - `scripts/deploy/drills/crash-api.override.yml` sets an invalid `Jwt__Key`, so the new api exits with code 2 and keeps
+    restarting.
+  - Drill: `deploy.ps1 -Version 9.9.9-drill -ComposeOverride scripts/deploy/drills/crash-api.override.yml
+    -ReadyTimeoutSeconds 60` → DEPLOY FAILED, then the automatic rollback to 1.5.0 with DB restore (CHECKDB clean,
+    342 rows match the manifest) and cache flush, in 12 s. Exit 1.
+- Note for local tools: use `127.0.0.1,14333` for sqlcmd, or rely on the new `[::1]` bindings.
