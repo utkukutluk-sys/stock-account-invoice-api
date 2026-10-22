@@ -35,6 +35,8 @@ public static class ErrorCodes
     public const string AccountTypeMismatch = "ACCOUNT_TYPE_MISMATCH";
     public const string InvalidReference = "INVALID_REFERENCE";
 
+    public const string RateLimited = "RATE_LIMITED";
+
     public const string InternalError = "INTERNAL_ERROR";
 
     private static readonly Dictionary<string, int> StatusByCode = new(StringComparer.Ordinal)
@@ -48,6 +50,7 @@ public static class ErrorCodes
         [AccountHasBalance] = 409, [AccountInUse] = 409, [CompanyNotEmpty] = 409, [CannotDeleteSelf] = 409,
         [InsufficientStock] = 422, [InvoiceHasNoLines] = 422, [InactiveStock] = 422, [InactiveAccount] = 422,
         [AccountTypeMismatch] = 422, [InvalidReference] = 422,
+        [RateLimited] = 429,
         [InternalError] = 500,
     };
 

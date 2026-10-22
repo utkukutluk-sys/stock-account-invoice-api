@@ -26,6 +26,11 @@ public static class DatabaseInitializer
         {
             await MigrateWithRetryAsync(services, logger, cancellationToken);
         }
+        else if (configuration.GetValue("Database:VerifySchemaOnStartup", true))
+        {
+            await using var scope = services.CreateAsyncScope();
+            await EnsureSchemaNotNewerAsync(scope.ServiceProvider.GetRequiredService<AppDbContext>(), cancellationToken);
+        }
 
         if (configuration.GetValue("Database:Seed", false))
         {
@@ -42,15 +47,38 @@ public static class DatabaseInitializer
             {
                 await using var scope = services.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                await EnsureSchemaNotNewerAsync(db, cancellationToken);
                 await db.Database.MigrateAsync(cancellationToken);
                 logger.LogInformation("Database migrated (attempt {Attempt})", attempt);
                 return;
             }
-            catch (Exception ex) when (attempt < MigrateAttempts && ex is not OperationCanceledException)
+            catch (Exception ex) when (attempt < MigrateAttempts && ex is not (OperationCanceledException or DatabaseSchemaMismatchException))
             {
                 logger.LogWarning(ex, "Database migration attempt {Attempt}/{Max} failed; retrying in {Delay}", attempt, MigrateAttempts, MigrateRetryDelay);
                 await Task.Delay(MigrateRetryDelay, cancellationToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Rollback guard: refuse to run against a database that has migrations this build does not know (i.e. the schema was
+    /// upgraded by a newer release). Restore the pre-deploy backup instead (scripts/deploy/rollback.ps1 -RestoreDatabase);
+    /// EF down-migrations are not used.
+    /// </summary>
+    public static async Task EnsureSchemaNotNewerAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        if (!await db.Database.CanConnectAsync(cancellationToken))
+        {
+            return; // database does not exist yet → MigrateAsync creates it
+        }
+
+        var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
+        var unknown = (await db.Database.GetAppliedMigrationsAsync(cancellationToken)).Where(m => !known.Contains(m)).ToList();
+        if (unknown.Count > 0)
+        {
+            throw new DatabaseSchemaMismatchException(
+                $"Database schema is newer than this API version (unknown applied migrations: {string.Join(", ", unknown)}). "
+                + "Roll back with scripts/deploy/rollback.ps1 -RestoreDatabase or deploy a matching version.");
         }
     }
 
@@ -73,3 +101,6 @@ public static class DatabaseInitializer
         }
     }
 }
+
+/// <summary>The database contains migrations unknown to this build (startup aborts, exit code 3).</summary>
+public sealed class DatabaseSchemaMismatchException(string message) : Exception(message);

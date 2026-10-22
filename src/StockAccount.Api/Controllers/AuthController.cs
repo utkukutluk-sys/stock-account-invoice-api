@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.RateLimiting;
+using StockAccount.Api.Setup;
 using Microsoft.Extensions.Options;
 using StockAccount.Application.Common.Exceptions;
 using StockAccount.Application.Common.Security;
@@ -21,6 +23,7 @@ public sealed class AuthController(IAuthService auth, IOptions<JwtOptions> jwtOp
     /// <response code="200">Access token + user info; Set-Cookie: sa_refresh.</response>
     /// <response code="401">INVALID_CREDENTIALS, ACCOUNT_LOCKED or USER_INACTIVE.</response>
     [HttpPost("login")]
+    [EnableRateLimiting(RateLimitingOptions.AuthPolicy)]
     [AllowAnonymous]
     [ProducesResponseType<AuthResponse>(StatusCodes.Status200OK)]
     public async Task<ActionResult<AuthResponse>> Login([FromBody] LoginRequest request, CancellationToken cancellationToken)
@@ -34,6 +37,7 @@ public sealed class AuthController(IAuthService auth, IOptions<JwtOptions> jwtOp
     /// <remarks>Only POST with Content-Type application/json and body <c>{}</c> is accepted (CSRF protection together with SameSite=Strict).</remarks>
     /// <response code="401">INVALID_REFRESH_TOKEN (missing/invalid/expired/reused cookie; the cookie is deleted).</response>
     [HttpPost("refresh")]
+    [EnableRateLimiting(RateLimitingOptions.AuthPolicy)]
     [AllowAnonymous]
     [Consumes("application/json")]
     [ProducesResponseType<AuthResponse>(StatusCodes.Status200OK)]

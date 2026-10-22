@@ -73,6 +73,7 @@ public static class ProblemWriter
         403 => ErrorCodes.Forbidden,
         404 or 405 => ErrorCodes.NotFound,
         409 => ErrorCodes.ConcurrencyConflict,
+        429 => ErrorCodes.RateLimited,
         >= 500 => ErrorCodes.InternalError,
         _ => ErrorCodes.ValidationFailed,
     };
@@ -85,6 +86,7 @@ public static class ProblemWriter
         404 => "Not found",
         409 => "Conflict",
         422 => "Business rule violation",
+        429 => "Too many requests",
         >= 500 => "Internal server error",
         _ => "Request failed",
     };
