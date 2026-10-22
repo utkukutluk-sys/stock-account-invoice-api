@@ -218,3 +218,56 @@ Infrastructure Persistence (DB agent) + Identity (UserManager config, Turkish er
   | create stock DRILL2 under 1.1.0 | list count 1, X-Cache HIT |
   | `rollback.ps1 -RestoreDatabase` | 1.1.0 → 1.0.0 in 11 s; restore OK (CHECKDB clean, row counts match the manifest); cache flushed; DRILL2 count 0 (X-Cache MISS); api/ui images :1.0.0 |
   | deploy 1.2.0 with a failing readiness URL | DEPLOY FAILED → automatic rollback to 1.0.0 with DB restore from pre-deploy-1.2.0, exit 1 |
+
+### 7.6 Database operations (DB_NOTES §8 / D15, commit 50f7df1)
+- **Least privilege.** The runtime API never uses `sa`.
+  - A one-shot compose service `db-migrate` runs the same image with `--migrate-only` and the `sa` connection
+    (`Application Name=StockAccount.Migrator`). It executes the schema guard, then EF migrations (300 s command timeout),
+    then the DB options, then creates the app login/user `APP_DB_USER` (default `stockaccount_app`) with password
+    `APP_DB_PASSWORD`.
+  - The login gets `db_datareader`, `db_datawriter` and `GRANT EXECUTE`.
+  - Every step is idempotent. `ALTER LOGIN` keeps the password in sync with `.env`; `ALTER USER … WITH LOGIN` re-maps the
+    user after a restore. Names and passwords are passed as SQL parameters and quoted with `QUOTENAME` inside the dynamic DDL.
+  - `api` depends on `db-migrate: service_completed_successfully` and runs with `Database:MigrateOnStartup=false`.
+    Seed and the opening-invoice approval are DML only, so they run as the app user.
+  - In strict environments, a runtime `ConnectionStrings:Default` with `User Id=sa` is a startup error.
+  - Verified on the stack:
+    - sessions: `StockAccount.Api / stockaccount_app` × 10 (Min Pool 10);
+    - as the app login: `UPDATE StockTrans` fails with **50001** (the ledger trigger still applies), `CREATE TABLE` fails
+      with **262**, `ALTER DATABASE` fails with **5011**.
+  - Local SQLEXPRESS dev (Windows auth, single connection string, `MigrateOnStartup=true`) is unchanged.
+- **AUTO_CLOSE OFF / recovery model.** These run as idempotent statements after migrating, outside a transaction
+  (`IF DATABASEPROPERTYEX(...) EXEC(N'ALTER DATABASE CURRENT SET ... WITH NO_WAIT')`). They work on Express and full SQL
+  Server.
+  - `Database:RecoveryModel` accepts SIMPLE, FULL or BULK_LOGGED (whitelisted → constant SQL). Unset leaves it as is.
+  - Docker sets it to **SIMPLE**: there are no log backups, and in FULL the log would grow without bound. The RPO is the
+    full-backup interval. For point-in-time recovery, switch to FULL and schedule log backups (DB_NOTES §8).
+  - Without ALTER permission (errors 5011/262/300/15247) it only logs a warning.
+  - Verified: `AUTO_CLOSE=0 RECOVERY=SIMPLE` (db-migrate log and `sys.databases`). They are re-applied after every
+    restore/rollback, because `compose up` re-runs db-migrate.
+- **Pool.** Every connection string has `Application Name=StockAccount.Api`.
+
+  | Profile | Max Pool | Min Pool | Other |
+  |---|---|---|---|
+  | local Express (`appsettings.json`) | 50 | 5 | Connect Timeout 15, ConnectRetryCount 3 / Interval 10 |
+  | docker / full SQL Server (compose) | 100 | 10 | `Encrypt=True;TrustServerCertificate=True`, MARS off |
+
+  The command timeout lives only in EF (`Database:CommandTimeoutSeconds`). Pool sizes are plain connection-string config.
+- **Culture (tr-TR).**
+  - `scripts/deploy/*.ps1` use `-cmatch`, `-cnotmatch`, `-ceq`, `-cne`, `-cin`, and an invariant regex for placeholder
+    detection.
+  - The .NET audit found no culture-sensitive operations on codes, keys, headers or policy names (`ToUpperInvariant`,
+    `ToLowerInvariant`, `Ordinal*`).
+  - `TurkishCultureTests` runs `NormalizeCode` and the cache key/hash under tr-TR: `pide-i1 → PIDE-I1`, and `ı`/`İ` are
+    rejected as codes. The hash is identical under tr-TR and invariant culture.
+- **Drill with the app user (2026-10-22, git 50f7df1).**
+  1. deploy 1.3.0: the earlier attempt was interrupted when Docker stopped, so it was re-run. Pre-deploy backup OK,
+     db-migrate created the login, DEPLOYED in 57 s.
+  2. deploy 1.4.0 in 14 s.
+  3. Created DRILL3 (count 1, X-Cache HIT).
+  4. `rollback.ps1 -RestoreDatabase`: 1.4.0 → 1.3.0 in 13 s. Restore OK (CHECKDB clean, 123 rows match the manifest),
+     `sa:*` flushed, db-migrate re-ran (options and login ensured).
+  5. Result: DRILL3 count 0 (X-Cache MISS) and all services healthy.
+- **Compatibility note.** Images built before 1.3.0 do not understand `--migrate-only`. To roll back to such a release, use
+  that release's compose file (`git checkout <release> -- docker-compose.yml`). In general, keep the compose file versioned
+  together with the release.
