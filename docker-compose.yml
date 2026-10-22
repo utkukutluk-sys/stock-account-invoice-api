@@ -1,19 +1,26 @@
-# StockAccountApp full stack (CONTRACT §8.2/§8.3). Copy .env.example to .env first:  docker compose up --build -d
+# StockAccountApp full stack (CONTRACT §8.2/§8.3).
+# First run: ./scripts/deploy/new-secrets.ps1 (creates .env with strong secrets), then
+#   docker compose up --build -d            (local, images tagged :local)
+#   ./scripts/deploy/deploy.ps1 -Version 1.2.0   (versioned deploy with pre-deploy backup + auto rollback)
+# Missing JWT_KEY / MSSQL_SA_PASSWORD make "docker compose" fail immediately.
 # Host ports: API 5080, ui-vue 5173, ui-nuxt 3000, SQL Server 14333, Redis 6379
 # (stop a local dev Redis container such as "sa-redis" first, it also binds 6379).
 name: stockaccount
 
 services:
   mssql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    # Pinned: SQL Server 2022 16.0.4305.5 (tag kept for readability, the digest is what is pulled).
+    image: mcr.microsoft.com/mssql/server:2022-latest@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required - run scripts/deploy/new-secrets.ps1}
       MSSQL_PID: Developer
     ports:
       - "14333:1433"
     volumes:
       - mssql-data:/var/opt/mssql
+      # Backups written by scripts/db/backup.ps1 -Target docker land in ./backups on the host.
+      - ./backups:/var/opt/mssql/backup
     healthcheck:
       test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q \"SELECT 1\" -b -o /dev/null"]
       interval: 10s
@@ -23,7 +30,8 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # Pinned: Redis 7.4.11 (alpine).
+    image: redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     ports:
       - "6379:6379"
     healthcheck:
@@ -37,13 +45,14 @@ services:
     build:
       context: .
       dockerfile: src/StockAccount.Api/Dockerfile
-    image: stockaccount-api
+    image: stockaccount-api:${APP_VERSION:-local}
     environment:
       ASPNETCORE_ENVIRONMENT: Docker
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True
+      ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=sa;Password=${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required};TrustServerCertificate=True;Max Pool Size=100;Min Pool Size=5;Connect Timeout=15
       ConnectionStrings__Redis: redis:6379,abortConnect=false,connectTimeout=1000,syncTimeout=1000,asyncTimeout=1000
-      Jwt__Key: ${JWT_KEY}
+      Jwt__Key: ${JWT_KEY:?JWT_KEY is required - run scripts/deploy/new-secrets.ps1}
+      APP_VERSION: ${APP_VERSION:-local}
       Database__MigrateOnStartup: "true"
       Database__Seed: "true"
     ports:
@@ -53,12 +62,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # The aspnet image has no curl/wget: plain HTTP over bash /dev/tcp against the dependency-free liveness endpoint.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   ui-vue:
     build:
       context: ./ui-vue
-    image: stockaccount-ui-vue
+    image: stockaccount-ui-vue:${APP_VERSION:-local}
     ports:
       - "5173:80"
     depends_on:
@@ -68,7 +84,7 @@ services:
   ui-nuxt:
     build:
       context: ./ui-nuxt
-    image: stockaccount-ui-nuxt
+    image: stockaccount-ui-nuxt:${APP_VERSION:-local}
     environment:
       NUXT_API_BASE: http://api:8080
     ports:

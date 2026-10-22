@@ -1,0 +1,4 @@
+# Backup files (*.bak + manifests) are never committed.
+*
+!.gitignore
+!.gitkeep

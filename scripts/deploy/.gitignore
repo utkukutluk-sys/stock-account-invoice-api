@@ -1,0 +1,2 @@
+# Deployment state (release history) is machine-local.
+.state/

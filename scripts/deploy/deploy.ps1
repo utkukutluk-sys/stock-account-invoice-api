@@ -1,0 +1,99 @@
+<#
+.SYNOPSIS
+  Versioned deploy of the compose stack with a pre-deploy database backup and automatic rollback.
+
+.DESCRIPTION
+  1. Pre-deploy backup via scripts/db/backup.ps1 -Target docker -Label pre-deploy-<version>. A failed backup aborts the
+     deploy. Skipped only for the very first deploy (no running mssql service yet) or with -SkipBackup.
+  2. Builds api/ui-vue/ui-nuxt images tagged <name>:<version> and <name>:sha-<git sha>.
+  3. Records the release in scripts/deploy/.state/releases.json (git-ignored).
+  4. docker compose up -d with APP_VERSION=<version> (mssql/redis keep running; pinned images).
+  5. Waits for /health/ready (200) served by the new api image. On failure: automatic rollback to the previous version
+     including the database restore from the pre-deploy backup (unless -NoAutoRollback).
+  Exit code 0 = deployed, 1 = failed (rolled back if possible).
+
+.EXAMPLE
+  ./scripts/deploy/deploy.ps1 -Version 1.2.0
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$Version,
+    [int]$ReadyTimeoutSeconds = 240,
+    [string]$HealthUrl = 'http://localhost:5080/health/ready',
+    [switch]$SkipBackup,
+    [switch]$NoAutoRollback
+)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_deploy-common.ps1')
+
+if ($Version -notmatch $script:VersionPattern) { throw "Invalid version '$Version' (expected e.g. 1.2.0)." }
+if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot '.env'))) { throw '.env not found: run scripts/deploy/new-secrets.ps1 first.' }
+
+$history = Read-History
+$previous = $history.current
+$sha = Get-GitSha
+$backupFile = $null
+$started = Get-Date
+Write-Deploy "deploying $Version (git $sha); currently live: $(if ($previous) { $previous } else { '<none>' })"
+
+try {
+    # ---- 1. pre-deploy backup
+    if ($SkipBackup) {
+        Write-Deploy 'backup skipped (-SkipBackup)' 'Yellow'
+    }
+    elseif (-not (Test-ServiceRunning 'mssql')) {
+        Write-Deploy 'mssql is not running yet (first deploy): no database to back up' 'Yellow'
+    }
+    else {
+        $backupScript = Join-Path $script:RepoRoot 'scripts\db\backup.ps1'
+        if (-not (Test-Path -LiteralPath $backupScript)) { throw "backup script missing: $backupScript" }
+        Write-Deploy "pre-deploy backup (label pre-deploy-$Version)"
+        $manifest = & $backupScript -Target docker -Label "pre-deploy-$Version"
+        if ($LASTEXITCODE -ne 0 -or -not $manifest) { throw 'pre-deploy backup FAILED - deploy aborted, nothing was changed.' }
+        $backupFile = @($manifest)[-1].file
+        Write-Deploy "backup OK: $backupFile" 'Green'
+    }
+
+    # ---- 2. build + tag
+    $env:APP_VERSION = $Version
+    Write-Deploy 'building images'
+    Invoke-Docker (@('compose', 'build') + $script:AppServices) | Out-Null
+    foreach ($image in $script:AppImages) {
+        Invoke-Docker @('tag', "${image}:$Version", "${image}:sha-$sha") -Quiet | Out-Null
+    }
+    Write-Deploy "tagged $($script:AppImages -join ', ') as :$Version and :sha-$sha"
+
+    # ---- 3. record
+    Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'deploying'; previous = $previous; preDeployBackup = $backupFile }
+    Save-History $history
+
+    # ---- 4. up
+    Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
+
+    # ---- 5. readiness
+    if (-not (Wait-Ready -Version $Version -HealthUrl $HealthUrl -TimeoutSeconds $ReadyTimeoutSeconds)) {
+        throw "$Version did not become ready within $ReadyTimeoutSeconds s ($HealthUrl)."
+    }
+
+    $history.current = $Version
+    Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'deployed'; previous = $previous; preDeployBackup = $backupFile }
+    Save-History $history
+    Write-Deploy ("DEPLOYED {0} in {1:N0} s (previous: {2}; pre-deploy backup: {3})" -f $Version, ((Get-Date) - $started).TotalSeconds, $previous, $backupFile) 'Green'
+    exit 0
+}
+catch {
+    Write-Deploy "DEPLOY FAILED: $($_.Exception.Message)" 'Red'
+    $history = Read-History
+    Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'failed'; previous = $previous; preDeployBackup = $backupFile; error = $_.Exception.Message }
+    Save-History $history
+
+    if (-not $NoAutoRollback -and $previous -and $previous -ne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
+        Write-Deploy "automatic rollback to $previous" 'Yellow'
+        $rollbackArgs = @{ Version = $previous; Reason = "auto: deploy of $Version failed" }
+        if ($backupFile) { $rollbackArgs.RestoreDatabase = $true; $rollbackArgs.BackupFile = $backupFile }
+        & (Join-Path $PSScriptRoot 'rollback.ps1') @rollbackArgs
+        if ($LASTEXITCODE -ne 0) { Write-Deploy 'AUTOMATIC ROLLBACK FAILED - manual intervention required' 'Red' }
+    }
+    exit 1
+}
