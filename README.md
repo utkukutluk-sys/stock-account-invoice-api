@@ -1,45 +1,143 @@
-# StockAccountApp
+# Stok, Cari ve Fiş Yönetimi — Web API + UI
 
-Stock / Current Account (Cari) / Invoice Web API (.NET 10, EF Core 10, SQL Server, Redis, Serilog) with two UIs
-(Vue 3 + PrimeVue in `ui-vue/`, Nuxt 4 SSR port in `ui-nuxt/`). Binding spec: `docs/CONTRACT.md`.
+Stok, Cari ve Fiş (fatura) hizmetleri sunan bir **.NET 10 Web API** ve bu API'yi kullanan iki ön yüz:
 
-## Prerequisites
-- .NET SDK 10, SQL Server Express `.\SQLEXPRESS` (Windows auth), Node 24 (UIs), Docker Desktop (optional: Redis, full stack).
+- **`ui-vue/`**: Vue 3, Vite, PrimeVue ve PrimeFlex ile yazılmış SPA.
+- **`ui-nuxt/`**: Aynı uygulamanın Nuxt 4'e taşınmış, SSR'lı sürümü (opsiyonel madde).
 
-## Run locally
-```powershell
-docker run -d --name sa-redis -p 6379:6379 redis:7-alpine   # optional; without it the API uses an in-memory cache
-dotnet tool restore
-dotnet run --project src/StockAccount.Api                    # http://localhost:5080, migrates + seeds on first start
-```
-- Swagger: http://localhost:5080/swagger · Health: http://localhost:5080/health
-- UIs: `cd ui-vue; npm ci; npm run dev` (http://localhost:5173) · `cd ui-nuxt; npm ci; npm run dev` (http://localhost:3000).
-  Both proxy `/api` to the API.
+Bütün sistem Docker Compose ile tek komutla ayağa kalkar (opsiyonel madde).
 
-## Run with Docker
+| Katman | Teknoloji |
+|---|---|
+| API | .NET 10, ASP.NET Core, EF Core 10 (Code-First + migration), ASP.NET Identity + JWT |
+| Veritabanı | Microsoft SQL Server |
+| Cache | Redis. Erişilemezse otomatik olarak bellek içi cache'e geçer (circuit breaker) |
+| Loglama | Serilog: console, günlük dönen dosya, request log, correlation id |
+| Dokümantasyon / test | Swagger (OpenAPI), Postman koleksiyonu, xUnit, Vitest, Playwright |
+| UI | Vue 3 + PrimeVue 4 + PrimeFlex, Nuxt 4 (SSR), Pinia |
+| Konteynır | Docker, docker-compose (mssql, redis, api, ui-vue, ui-nuxt) |
+
+---
+
+## Hızlı başlangıç (Docker)
+
 ```powershell
 copy .env.example .env
-docker stop sa-redis        # compose redis also binds 6379
 docker compose up --build -d
 ```
-API http://localhost:5080, ui-vue http://localhost:5173, ui-nuxt http://localhost:3000, SQL Server localhost,14333 (sa).
 
-## Seed users
-| Email | Password | Role |
+| Servis | Adres |
+|---|---|
+| Vue arayüzü | http://localhost:5173 |
+| Nuxt arayüzü (SSR) | http://localhost:3000 |
+| API + Swagger | http://localhost:5080/swagger |
+| Health | http://localhost:5080/health |
+| SQL Server | `localhost,14333` (kullanıcı `sa`, şifre `.env` içinde) |
+
+API ilk açılışta migration'ları uygular ve örnek verileri yükler.
+
+### Demo kullanıcılar
+
+| E-posta | Şifre | Rol |
 |---|---|---|
-| admin@stockaccount.local | Admin123! | Admin (all companies; `X-Company-Id` selects one) |
-| demo@stockaccount.local | Demo123! | Operator of "Demo Gıda A.Ş." |
-| ahmet@stockaccount.local | Ahmet123! | Portal user of account C001 (Ahmet Yılmaz) |
+| admin@stockaccount.local | Admin123! | **Admin**: tüm şirketleri yönetir; şirket seçimi üst bardan yapılır |
+| demo@stockaccount.local | Demo123! | **User**: "Demo Gıda A.Ş." şirketinin operatörü |
+| ahmet@stockaccount.local | Ahmet123! | **User (cari portalı)**: C001 Ahmet Yılmaz carisine bağlı; yalnız kendi fişlerini ve bakiyesini görür |
 
-## Tests
-- Unit: `dotnet test tests/StockAccount.UnitTests`
-- Integration: `dotnet test tests/StockAccount.IntegrationTests` (SQLEXPRESS, per-run database)
-- Postman: `cd postman; npm test` · E2E: `cd e2e; npm run test:vue` / `npm run test:nuxt`
+## Yerel geliştirme (Docker'sız)
 
-## Architecture (summary)
-Clean architecture: `Domain` (entities, calculations) ← `Application` (services, DTOs, FluentValidation, cache/auth
-abstractions) ← `Infrastructure` (EF Core, Identity/JWT, Redis cache with fallback, reconciliation background service)
-← `Api` (controllers, ProblemDetails, ETag, correlation id, Serilog, Swagger, health). Key decisions: JWT access token in
-memory + rotating refresh token in an httpOnly `sa_refresh` cookie, immutable ledgers (StockTrans/ActTrans) written only by
-invoice approve/cancel in one transaction with optimistic-concurrency retry, stored balances verified by a periodic
-reconciliation job. Details: `docs/BACKEND_NOTES.md`, `docs/DB_NOTES.md`.
+Gereksinimler: .NET SDK 10, SQL Server (varsayılan `.\SQLEXPRESS`, Windows auth), Node 24. Redis isteğe bağlıdır.
+
+```powershell
+docker run -d --name sa-redis -p 6379:6379 redis:7-alpine   # isteğe bağlı
+dotnet tool restore
+dotnet run --project src/StockAccount.Api                    # http://localhost:5080
+
+cd ui-vue;  npm ci; npm run dev                              # http://localhost:5173
+cd ui-nuxt; npm ci; npm run dev                              # http://localhost:3000
+```
+
+İki arayüz de `/api` isteklerini API'ye proxy'ler. Böylece refresh cookie aynı origin üzerinden taşınır.
+
+> Docker Compose'u çalıştırmadan önce `sa-redis` konteynırını durdurun (`docker stop sa-redis`), ikisi de 6379 portunu kullanır.
+
+---
+
+## Gereksinimlerin karşılanması
+
+| Ödev maddesi | Karşılandığı yer |
+|---|---|
+| Admin / User yetkilendirmesi | Identity + JWT. Politikalar: `AdminOnly`, `Operator`, `Portal`. Access token yalnızca bellekte tutulur; refresh token httpOnly + SameSite=Strict cookie'dedir, her kullanımda yenilenir ve tekrar kullanılırsa iptal edilir |
+| Şirket ana büyüklük; şirket bir kullanıcı olabilir | Tüm kayıtlar `CompanyId` ile şirkete bağlıdır, kullanıcılar bir şirkete aittir. Admin `X-Company-Id` header'ı ile şirket seçer |
+| Cari bir kullanıcı olabilir | Kullanıcı bir cariye bağlanabilir ve cari portalını (`/api/me/*`) kullanır |
+| Stok, Cari, Fiş ve Şirket/Kullanıcı CRUD | Tüm büyüklükler için REST endpoint'leri ve arayüz ekranları |
+| Listelerde sayfalama ve filtreleme | `page`, `pageSize` (en fazla 100), `sort` ve büyüklüğe özel filtreler. Sıralama alanları whitelist ile sınırlıdır, SQL injection'a kapalıdır |
+| Stok ve cari için cache, CRUD ile otomatik yenilenmesi | Redis'te sürüm numaralı liste anahtarları kullanılır. Ekleme, güncelleme, silme ve fiş onay/iptal işlemlerinde ilgili cache temizlenir. Yanıtta `X-Cache: HIT/MISS` header'ı döner |
+| UI'da HTTP isteklerinin cache'lenmesi | Vue: URL önekine göre TTL'li LRU cache, aynı anda giden aynı isteklerin birleştirilmesi, ETag/304 ve değişiklik sonrası temizleme. Nuxt: `useAsyncData` + `getCachedData` |
+| Fiş: başlık (cari, tarih, seri) + detay (stok) | `Invoice` + `InvoiceLine`. Satış ve alış tipleri, satır bazında KDV (%0/1/10/20) |
+| İlk oluşturulduğunda taslak | Durumlar: `Draft` → `Approved` → `Cancelled`. Yalnız taslak fiş düzenlenip silinebilir |
+| Onay ile cari ve stok hareketleri | Onay tek transaction'da yapılır: StockTrans ve ActTrans kayıtları yazılır, saklanan bakiyeler güncellenir, fiş numarası verilir (ör. SAT000001) |
+| Balance değerleri stok ve cari kayıtlarında | `Stock.Balance` ve `CurrentAccount.Balance` alanları. Arka plandaki mutabakat servisi bu değerleri hareket toplamlarıyla periyodik olarak karşılaştırır |
+| Serilog | Console + dosya log, request log; log satırlarında kullanıcı, şirket ve correlation id bulunur |
+| Swagger ve Postman | `/swagger` (JWT "Authorize" butonu ile), `postman/` altında koleksiyon ve iki ortam dosyası |
+| (Opsiyonel) Nuxt'a geçiş | `ui-nuxt/`: SSR açık; refresh cookie sunucu tarafında iletilir, sayfalar veriyle birlikte render edilir |
+| (Opsiyonel) Docker | API ve iki UI için Dockerfile, `docker-compose.yml` ve health check'ler |
+
+### Örnek senaryo: Ahmet'e 2 kg Elma satışı
+
+1. Ahmet carisine satış fişi oluşturulur: 2 kg ELMA × 50,00 TL, %1 KDV. Fiş **taslak** durumdadır, toplam **101,00 TL**'dir.
+2. Fiş **onaylanır** ve SAT000001 numarasını alır.
+   - **StockTrans:** ELMA için 2 kg **çıkış** (tüketim) kaydı yazılır.
+   - **ActTrans:** Ahmet için **101,00 TL borç** kaydı yazılır.
+   - Saklanan bakiyeler güncellenir: ELMA 100 → 98, Ahmet 0 → 101,00.
+3. Fiş iptal edilirse (yalnız Admin) ters kayıtlar yazılır ve bakiyeler eski haline döner. Hareket tabloları değiştirilemez ve silinemez; bunu veritabanındaki trigger'lar garanti eder.
+
+Bu senaryo xUnit entegrasyon testlerinde, Postman koleksiyonunda ve Playwright E2E testlerinde otomatik olarak doğrulanır.
+
+---
+
+## Mimari
+
+```
+src/
+  StockAccount.Domain          entity'ler, enum'lar, hesaplama ve iş kuralları
+  StockAccount.Application     servisler, DTO'lar, FluentValidation, cache ve yetki soyutlamaları
+  StockAccount.Infrastructure  EF Core (DbContext, konfigürasyonlar, migration'lar, seed), Identity/JWT,
+                               Redis cache + circuit breaker, mutabakat background service
+  StockAccount.Api             controller'lar, ProblemDetails hata yönetimi, ETag, Serilog, Swagger, health
+tests/
+  StockAccount.UnitTests        domain hesapları, onay/iptal, validator'lar, cache, circuit breaker
+  StockAccount.IntegrationTests WebApplicationFactory; her koşuda yeni bir SQL Server veritabanı
+ui-vue/   ui-nuxt/   e2e/ (Playwright)   postman/   docs/
+```
+
+Öne çıkan kararlar:
+
+- **Veri bütünlüğü:**
+  - Finansal ilişkilerde FK'ler `Restrict` ile tanımlıdır.
+  - 26 CHECK constraint vardır.
+  - Silinmiş kayıtları hariç tutan filtreli unique index'ler kullanılır.
+  - Eşzamanlılık `rowversion` ile kontrol edilir.
+  - Fiş numarası (şirket, seri, numara) üzerindeki unique index ile korunur.
+  - Onay işlemi, çakışmada 3 kereye kadar yeniden denenir. Aynı stoğa paralel onaylarda bile stok eksiye düşmez.
+- **Silme:** Şirket, stok ve cari soft delete ile silinir. Bakiyesi olan ya da bir fişte kullanılan kayıt silinemez.
+- **Hata formatı:** Tüm hatalar `application/problem+json` formatında, iş kodu ile döner (`INSUFFICIENT_STOCK`, `INVOICE_NOT_DRAFT` vb.).
+
+Ayrıntılı tasarım belgeleri:
+
+- [docs/CONTRACT.md](docs/CONTRACT.md): API sözleşmesi, veri modeli, iş kuralları
+- [docs/DB_NOTES.md](docs/DB_NOTES.md): veritabanı tasarım notları
+- [docs/BACKEND_NOTES.md](docs/BACKEND_NOTES.md): backend tasarım notları
+- [docs/FRONTEND_NOTES.md](docs/FRONTEND_NOTES.md): frontend tasarım notları
+
+## Testler
+
+| Test seti | Komut | Sonuç |
+|---|---|---|
+| Birim (.NET) | `dotnet test tests/StockAccount.UnitTests` | 94 / 94 |
+| Entegrasyon (.NET) | `dotnet test tests/StockAccount.IntegrationTests` | 153 / 153 |
+| Birim (ui-vue / ui-nuxt) | `npm test` | 74 / 74 ve 57 / 57 |
+| Postman (newman) | `cd postman; npm test` | 115 istek, 350 doğrulama, 0 hata |
+| E2E (Playwright: Vue, Nuxt ve ikisinin mobil görünümü) | `cd e2e; npm run test:vue` / `npm run test:nuxt` | 56 geçti, 2 atlandı (yalnız Nuxt'a ait testler), 0 hata |
+
+Test kapsamı, bulunan ve düzeltilen hatalar ve gereksinim izlenebilirliği: [docs/TEST_REPORT.md](docs/TEST_REPORT.md).

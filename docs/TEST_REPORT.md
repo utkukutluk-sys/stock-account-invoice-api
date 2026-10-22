@@ -16,7 +16,7 @@ Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11
 | Playwright, local dev servers, 4 projects (vue, nuxt, vue-mobile, nuxt-mobile) | **58 tests: 56 passed, 2 skipped** (Nuxt-only tests on vue), 0 failed. The BUG-4 test is a normal passing test now, and the Nuxt logout workaround was removed | 4.5 min |
 | Docker: `compose up -d --build` (api + ui-nuxt rebuilt) | all 5 services healthy; newman **115 / 350 / 0 failed**; Playwright `@smoke` **17 passed, 1 skipped** (incl. both mobile projects); BUG-4, dark-mode and proactive-refresh tests **6/6** on the production images; `down -v`, sa-redis restarted | 36 s up, 1.5 min smoke |
 
-Bug status: BUG-1…BUG-5 **Verified**. New in round 2: **BUG-6** (Medium, Backend), Redis outage latency (§5).
+Bug status: BUG-1…BUG-6 all **Verified** (BUG-6 found in round 2, fixed in 9b9c963 and verified by the tightened `RedisOutageTests`; §5).
 
 ### 1.2 Round 1: initial run (history)
 
@@ -110,7 +110,7 @@ Collection-level pre-request script logs in as admin when `accessToken` is empty
 | BUG-3 | Low | Backend | Swagger gaps: missing 2xx responses on 28 operations, Bearer required on anonymous auth endpoints | **Verified**: `SwaggerTests` (43 operations: 2xx and auth), newman regression |
 | BUG-4 | **High** | Frontend (ui-nuxt) | Page freezes (main thread blocked) after logout that follows a client-side login | **Verified** (f5be41d): E2E regression on nuxt dev and on the Docker image; workarounds removed |
 | BUG-5 | Low | Backend | Request-completion log lines have an empty `CompanyId` | **Verified**: the last 400 operator request lines in `logs/api-20261022.log` all show `[U:2] [C:1]` |
-| BUG-6 | Medium | Backend | When Redis goes down at runtime, every cached read and write waits for the Redis timeouts (4–8 s per request) | **Open** |
+| BUG-6 | Medium | Backend | When Redis goes down at runtime, every cached read and write waits for the Redis timeouts (4–8 s per request) | **Verified** (9b9c963): circuit breaker + 1 s Redis timeouts; `RedisOutageTests` now asserts cached GETs < 1 s during the outage (measured: 4–8 s → 1–45 ms) and no stale data after recovery |
 
 ### BUG-1 — Operator gets 403 on `GET /api/companies/current` (Medium, Backend)
 - Repro: `POST /api/auth/login` as `demo@stockaccount.local / Demo123!` → `GET /api/companies/current` with the bearer token.
