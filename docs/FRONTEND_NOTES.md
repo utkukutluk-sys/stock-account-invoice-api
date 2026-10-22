@@ -115,5 +115,8 @@ PrimeVue 4.5 (Aura, emerald primary, `.app-dark` dark mode toggle), PrimeFlex 4,
 - None blocking. Both UIs were verified end to end against the real API on 5080 on 2026-10-22 (16/16 smoke steps each).
 - The UIs already follow BACKEND_NOTES §4: the `X-Company-Id` header, a JSON body on refresh/logout, and no `quantity` sort on ActTrans.
 
-## Not verified
-- Nuxt logs a hydration-mismatch warning on some pages (cosmetic; the date or theme differs between server and client).
+## Hydration
+- Timestamps (`formatDateTime`, `formatDate` for ISO values) are formatted in a fixed time zone, Europe/Istanbul. Before this, the server and browser time zones produced different text and Vue reported hydration mismatches on /users and on the invoice editor.
+- DateOnly values are never shifted. The default invoice date is `todayDateOnly()` in Istanbul. The theme class is rendered from the `sa_theme` cookie during SSR.
+- Check against a running production build: `BASE=http://localhost:3000 npm run check:hydration` (in ui-nuxt). It logs in, switches the company, and fully loads the dashboard, lists, invoice editor (new and existing), transactions, users, profile and login pages in light and dark theme, with the browser in America/New_York and Asia/Tokyo. It fails on any console hydration warning.
+- Last result against the compose container: OK.

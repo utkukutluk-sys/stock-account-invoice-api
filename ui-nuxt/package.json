@@ -9,7 +9,8 @@
     "preview": "node .output/server/index.mjs",
     "postinstall": "nuxt prepare",
     "type-check": "nuxt typecheck",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:hydration": "node scripts/check-hydration.mjs"
   },
   "dependencies": {
     "@pinia/nuxt": "^1.0.3",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "playwright": "^1.64.1",
     "typescript": "~5.9",
     "vitest": "^5.0.5",
     "vue-tsc": "^3.3.13"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dataValue, formatBalance, formatDate, formatMoney, formatQuantity, fromDateOnly, toDateOnly } from '../format'
+import { dataValue, formatBalance, formatDate, formatDateTime, formatMoney, formatQuantity, fromDateOnly, toDateOnly, todayDateOnly } from '../format'
 
 // Intl may use a narrow no-break space; normalize for assertions.
 const n = (s: string) => s.replace(/ | /g, ' ')
@@ -33,5 +33,19 @@ describe('format (tr-TR)', () => {
     expect(dataValue(101)).toBe('101')
     expect(dataValue(-3900)).toBe('-3900')
     expect(dataValue(98.5)).toBe('98.5')
+  })
+})
+
+describe('time zone independent timestamps (SSR hydration)', () => {
+  it('formats timestamps in Europe/Istanbul regardless of the runtime time zone', () => {
+    expect(formatDateTime('2026-10-22T08:56:00Z')).toBe('22.10.2026 11:56')
+    expect(formatDateTime('2026-01-31T22:30:00Z')).toBe('01.02.2026 01:30')
+    expect(formatDate('2026-01-31T22:30:00Z')).toBe('01.02.2026')
+    expect(formatDate('2026-01-31')).toBe('31.01.2026')
+  })
+
+  it('today is the Istanbul calendar date', () => {
+    expect(todayDateOnly(new Date('2026-12-31T21:30:00Z'))).toBe('2027-01-01')
+    expect(todayDateOnly(new Date('2026-12-31T20:30:00Z'))).toBe('2026-12-31')
   })
 })

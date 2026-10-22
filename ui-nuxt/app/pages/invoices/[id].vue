@@ -14,7 +14,7 @@ import { useCompanyGuard } from '@/composables/useCompanyGuard'
 import { useAuthStore } from '@/stores/auth'
 import { invoiceTypeLabels, invoiceTypeOptions, isAccountCompatible, unitLabel, vatRateOptions } from '@/i18n/labels'
 import { calcLine, calcTotals } from '@/lib/money'
-import { dataValue, formatDate, formatDateTime, formatMoney, formatNumber, formatQuantity, toDateOnly } from '@/lib/format'
+import { dataValue, formatDate, formatDateTime, formatMoney, formatNumber, formatQuantity, todayDateOnly } from '@/lib/format'
 import { confirmAction, confirmDelete } from '@/lib/confirm'
 import {
   accountLabel,
@@ -62,7 +62,7 @@ const busy = ref<null | 'save' | 'approve' | 'cancel' | 'delete'>(null)
 const header = reactive<HeaderModel>({
   type: 'Sales',
   series: defaultSeries('Sales'),
-  invoiceDate: toDateOnly(new Date()),
+  invoiceDate: todayDateOnly(),
   dueDate: null,
   account: null,
   description: '',

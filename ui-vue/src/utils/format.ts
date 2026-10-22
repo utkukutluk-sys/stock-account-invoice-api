@@ -33,7 +33,31 @@ export function formatBalance(n: number | null | undefined): string {
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
-/** `yyyy-MM-dd` or ISO timestamp → `dd.MM.yyyy`. Date-only strings are not shifted by time zone. */
+/**
+ * Timestamps are shown in a fixed business time zone so SSR (server TZ) and the browser render the
+ * same text (no hydration mismatch) and every user sees the same wall-clock time.
+ */
+export const DISPLAY_TIME_ZONE = 'Europe/Istanbul'
+
+const tsFmt = new Intl.DateTimeFormat('tr-TR', {
+  timeZone: DISPLAY_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
+
+type ZonedParts = Record<'year' | 'month' | 'day' | 'hour' | 'minute', string>
+
+function zonedParts(d: Date): ZonedParts {
+  const out: ZonedParts = { year: '', month: '', day: '', hour: '', minute: '' }
+  for (const p of tsFmt.formatToParts(d)) if (p.type in out) out[p.type as keyof ZonedParts] = p.value
+  return out
+}
+
+/** `yyyy-MM-dd` stays as is (no time zone shift); timestamps/Dates → `dd.MM.yyyy` in Europe/Istanbul. */
 export function formatDate(value: string | Date | null | undefined): string {
   if (!value) return ''
   if (typeof value === 'string') {
@@ -42,14 +66,23 @@ export function formatDate(value: string | Date | null | undefined): string {
   }
   const d = typeof value === 'string' ? new Date(value) : value
   if (Number.isNaN(d.getTime())) return ''
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`
+  const p = zonedParts(d)
+  return `${p.day}.${p.month}.${p.year}`
 }
 
+/** ISO timestamp → `dd.MM.yyyy HH:mm` in Europe/Istanbul (identical on server and client). */
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return ''
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
-  return `${formatDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const p = zonedParts(d)
+  return `${p.day}.${p.month}.${p.year} ${p.hour}:${p.minute}`
+}
+
+/** Today's date (`yyyy-MM-dd`) in Europe/Istanbul: the same default on server and client. */
+export function todayDateOnly(now: Date = new Date()): string {
+  const p = zonedParts(now)
+  return `${p.year}-${p.month}-${p.day}`
 }
 
 /** Local Date → `yyyy-MM-dd` (DateOnly wire format). */
