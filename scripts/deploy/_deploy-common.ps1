@@ -6,6 +6,7 @@ $script:StateDir    = Join-Path $PSScriptRoot '.state'
 $script:HistoryFile = Join-Path $script:StateDir 'releases.json'
 $script:AppImages   = @('stockaccount-api', 'stockaccount-ui-vue', 'stockaccount-ui-nuxt')
 $script:AppServices = @('api', 'ui-vue', 'ui-nuxt')
+# Use -cmatch/-ceq: PowerShell -match/-eq are culture-sensitive and fail on "I" under tr-TR.
 $script:VersionPattern = '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 function Write-Deploy([string]$Message, [string]$Color = 'Cyan') { Write-Host "[deploy] $Message" -ForegroundColor $Color }
@@ -61,16 +62,16 @@ function Add-HistoryEvent($History, [hashtable]$Event) {
 
 # Version that was live immediately before $Current (last successful deploy/rollback to a different version).
 function Get-PreviousVersion($History, [string]$Current) {
-    $live = @($History.releases | Where-Object { $_.status -in @('deployed', 'rolled-back-to') } | ForEach-Object { $_.version })
+    $live = @($History.releases | Where-Object { $_.status -cin @('deployed', 'rolled-back-to') } | ForEach-Object { $_.version })
     for ($i = $live.Count - 1; $i -ge 0; $i--) {
-        if ($live[$i] -ne $Current) { return $live[$i] }
+        if ($live[$i] -cne $Current) { return $live[$i] }
     }
     return $null
 }
 
 function Test-ImageExists([string]$Image) {
     $out = Invoke-Docker @('image', 'inspect', '--format', '{{.Id}}', $Image) -AllowFailure -Quiet
-    return ($script:LastDockerExit -eq 0 -and ($out -join "") -match "^sha256:")
+    return ($script:LastDockerExit -eq 0 -and ($out -join "") -cmatch "^sha256:")
 }
 
 function Test-ServiceRunning([string]$Service) {
@@ -86,7 +87,7 @@ function Wait-Ready([string]$Version, [string]$HealthUrl, [int]$TimeoutSeconds) 
         $cid = ((Invoke-Docker @('compose', 'ps', '-q', 'api') -AllowFailure -Quiet) -join '').Trim()
         if ($cid) {
             $image = ((Invoke-Docker @('inspect', '--format', '{{.Config.Image}}', $cid) -AllowFailure -Quiet) -join '').Trim()
-            if ($image -eq $expectedImage) {
+            if ($image -ceq $expectedImage) {
                 try {
                     $res = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5
                     if ($res.StatusCode -eq 200) {

@@ -24,7 +24,7 @@ public static class DatabaseInitializer
     {
         if (configuration.GetValue("Database:MigrateOnStartup", false))
         {
-            await MigrateWithRetryAsync(services, logger, cancellationToken);
+            await MigrateWithRetryAsync(services, configuration, logger, cancellationToken);
         }
         else if (configuration.GetValue("Database:VerifySchemaOnStartup", true))
         {
@@ -39,7 +39,14 @@ public static class DatabaseInitializer
         }
     }
 
-    private static async Task MigrateWithRetryAsync(IServiceProvider services, ILogger logger, CancellationToken cancellationToken)
+    /// <summary>
+    /// Migrator mode (<c>--migrate-only</c>, compose service <c>db-migrate</c> running with the privileged connection):
+    /// schema guard, migrate, database options and the least-privilege app login. No seed; the API seeds as the app user.
+    /// </summary>
+    public static Task MigrateOnlyAsync(IServiceProvider services, IConfiguration configuration, ILogger logger, CancellationToken cancellationToken = default) =>
+        MigrateWithRetryAsync(services, configuration, logger, cancellationToken);
+
+    private static async Task MigrateWithRetryAsync(IServiceProvider services, IConfiguration configuration, ILogger logger, CancellationToken cancellationToken)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -48,8 +55,10 @@ public static class DatabaseInitializer
                 await using var scope = services.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 await EnsureSchemaNotNewerAsync(db, cancellationToken);
+                db.Database.SetCommandTimeout(TimeSpan.FromSeconds(300)); // migrations only; runtime uses Database:CommandTimeoutSeconds
                 await db.Database.MigrateAsync(cancellationToken);
                 logger.LogInformation("Database migrated (attempt {Attempt})", attempt);
+                await DatabaseProvisioner.ApplyAsync(db, configuration, logger, cancellationToken);
                 return;
             }
             catch (Exception ex) when (attempt < MigrateAttempts && ex is not (OperationCanceledException or DatabaseSchemaMismatchException))

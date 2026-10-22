@@ -27,7 +27,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deploy-common.ps1')
 
-if ($Version -notmatch $script:VersionPattern) { throw "Invalid version '$Version' (expected e.g. 1.2.0)." }
+if ($Version -cnotmatch $script:VersionPattern) { throw "Invalid version '$Version' (expected e.g. 1.2.0)." }
 if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot '.env'))) { throw '.env not found: run scripts/deploy/new-secrets.ps1 first.' }
 
 $history = Read-History
@@ -88,7 +88,7 @@ catch {
     Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'failed'; previous = $previous; preDeployBackup = $backupFile; error = $_.Exception.Message }
     Save-History $history
 
-    if (-not $NoAutoRollback -and $previous -and $previous -ne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
+    if (-not $NoAutoRollback -and $previous -and $previous -cne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
         Write-Deploy "automatic rollback to $previous" 'Yellow'
         $rollbackArgs = @{ Version = $previous; From = $Version; Reason ="auto: deploy of $Version failed" }
         if ($backupFile) { $rollbackArgs.RestoreDatabase = $true; $rollbackArgs.BackupFile = $backupFile }

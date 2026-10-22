@@ -41,6 +41,32 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # One-shot privileged init step (sa): schema guard + EF migrations + AUTO_CLOSE OFF + RECOVERY SIMPLE + the
+  # least-privilege app login/user. Runs on every "up"; the api starts only after it completed successfully.
+  db-migrate:
+    build:
+      context: .
+      dockerfile: src/StockAccount.Api/Dockerfile
+    image: stockaccount-api:${APP_VERSION:-local}
+    command: ["--migrate-only"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Docker
+      ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=sa;Password=${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required};TrustServerCertificate=True;Application Name=StockAccount.Migrator;Connect Timeout=15
+      Jwt__Key: ${JWT_KEY:?JWT_KEY is required - run scripts/deploy/new-secrets.ps1}
+      Cache__Enabled: "false"
+      Reconciliation__Enabled: "false"
+      Database__MigrateOnStartup: "true"
+      Database__Seed: "false"
+      # SIMPLE: no log backups are scheduled (log would grow without bound in FULL). For point-in-time recovery switch to
+      # FULL and schedule log backups (see DB_NOTES §8).
+      Database__RecoveryModel: SIMPLE
+      Database__AppLogin__Name: ${APP_DB_USER:-stockaccount_app}
+      Database__AppLogin__Password: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is required - run scripts/deploy/new-secrets.ps1}
+    depends_on:
+      mssql:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
@@ -49,15 +75,19 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Docker
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=sa;Password=${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required};TrustServerCertificate=True;Max Pool Size=100;Min Pool Size=5;Connect Timeout=15
+      # Runtime uses the least-privilege app login (db_datareader/db_datawriter/EXECUTE), never sa.
+      ConnectionStrings__Default: Server=mssql,1433;Database=StockAccountDb;User Id=${APP_DB_USER:-stockaccount_app};Password=${APP_DB_PASSWORD:?APP_DB_PASSWORD is required};Encrypt=True;TrustServerCertificate=True;Application Name=StockAccount.Api;Max Pool Size=100;Min Pool Size=10;Connect Timeout=15;ConnectRetryCount=3;ConnectRetryInterval=10;MultipleActiveResultSets=False
       ConnectionStrings__Redis: redis:6379,abortConnect=false,connectTimeout=1000,syncTimeout=1000,asyncTimeout=1000
       Jwt__Key: ${JWT_KEY:?JWT_KEY is required - run scripts/deploy/new-secrets.ps1}
       APP_VERSION: ${APP_VERSION:-local}
-      Database__MigrateOnStartup: "true"
+      Database__MigrateOnStartup: "false"
+      Database__VerifySchemaOnStartup: "true"
       Database__Seed: "true"
     ports:
       - "5080:8080"
     depends_on:
+      db-migrate:
+        condition: service_completed_successfully
       mssql:
         condition: service_healthy
       redis:

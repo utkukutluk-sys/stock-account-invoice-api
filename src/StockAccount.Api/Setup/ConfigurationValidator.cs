@@ -23,19 +23,59 @@ public static class ConfigurationValidator
         public bool IsValid => Errors.Count == 0;
     }
 
+    private static bool UsesSaLogin(string connectionString)
+    {
+        try
+        {
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connectionString);
+            return string.Equals(builder.UserID, "sa", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException)
+        {
+            return false; // malformed strings fail later with a clear SqlClient error
+        }
+    }
+
     public static bool IsStrict(IHostEnvironment env) =>
         !env.IsDevelopment() && !env.IsEnvironment(TestingEnvironment) && !env.IsEnvironment(DockerEnvironment);
 
-    public static Result Validate(IConfiguration config, IHostEnvironment env)
+    public static Result Validate(IConfiguration config, IHostEnvironment env, bool migrateOnly = false)
     {
         var errors = new List<string>();
         var warnings = new List<string>();
         var strict = IsStrict(env);
 
         // ---- Connection strings
-        if (string.IsNullOrWhiteSpace(config.GetConnectionString("Default")))
+        var defaultConnection = config.GetConnectionString("Default");
+        if (string.IsNullOrWhiteSpace(defaultConnection))
         {
             errors.Add("ConnectionStrings:Default is missing");
+        }
+        else if (strict && !migrateOnly && UsesSaLogin(defaultConnection))
+        {
+            errors.Add("ConnectionStrings:Default must not use the 'sa' login at runtime; use the least-privilege app login (APP_DB_USER)");
+        }
+
+        var appLogin = config.GetValue<string>("Database:AppLogin:Name");
+        if (!string.IsNullOrWhiteSpace(appLogin))
+        {
+            if (!StockAccount.Infrastructure.Startup.DatabaseProvisioner.LoginNameRegex().IsMatch(appLogin) || string.Equals(appLogin, "sa", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Database:AppLogin:Name is invalid (letters, digits and '_' only, not 'sa')");
+            }
+
+            var appPassword = config.GetValue<string>("Database:AppLogin:Password") ?? string.Empty;
+            if (appPassword.Length is < 8 or > 128)
+            {
+                errors.Add("Database:AppLogin:Password is missing or not 8-128 characters");
+            }
+        }
+
+        var recoveryModel = config.GetValue<string>("Database:RecoveryModel");
+        if (!string.IsNullOrWhiteSpace(recoveryModel)
+            && !StockAccount.Infrastructure.Startup.DatabaseProvisioner.RecoveryModels.Contains(recoveryModel.Trim(), StringComparer.OrdinalIgnoreCase))
+        {
+            errors.Add("Database:RecoveryModel must be SIMPLE, FULL or BULK_LOGGED");
         }
 
         var cache = config.GetSection(CacheOptions.SectionName).Get<CacheOptions>() ?? new CacheOptions();

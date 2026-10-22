@@ -4,7 +4,8 @@
 
 .DESCRIPTION
   - JWT_KEY: 64 random bytes, Base64Url (86 chars).
-  - MSSQL_SA_PASSWORD: 28 chars with upper, lower, digits and symbols (SQL Server policy).
+  - MSSQL_SA_PASSWORD, APP_DB_PASSWORD: 28 chars with upper, lower, digits and symbols (SQL Server policy).
+    APP_DB_PASSWORD is the least-privilege runtime login; db-migrate creates it / syncs it (ALTER LOGIN) on every "up".
   Existing non-placeholder values are kept unless -Force. Values are never printed.
   NOTE: the SA password is applied by SQL Server only when the mssql data volume is created. Changing it for an existing
   volume requires `docker compose down -v` (data loss: take a backup first) or ALTER LOGIN sa inside the container.
@@ -16,7 +17,7 @@
 param(
     [switch]$Force,
     # Which secrets to (re)generate. Use -Keys JWT_KEY for an existing mssql volume (the SA password is fixed at volume creation).
-    [ValidateSet('JWT_KEY', 'MSSQL_SA_PASSWORD')][string[]]$Keys = @('JWT_KEY', 'MSSQL_SA_PASSWORD')
+    [ValidateSet('JWT_KEY', 'MSSQL_SA_PASSWORD', 'APP_DB_PASSWORD')][string[]]$Keys = @('JWT_KEY', 'MSSQL_SA_PASSWORD', 'APP_DB_PASSWORD')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,16 +47,18 @@ function New-SaPassword {
 
 function Test-Placeholder([string]$Key, [string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { return $true }
-    if ($Key -eq 'JWT_KEY') { return ($Value -match '(?i)change-me|DEV-ONLY') }
-    if ($Key -eq 'MSSQL_SA_PASSWORD') { return ($Value -eq 'StockAccount!2026') }
+    # Ordinal / culture-invariant comparisons only (tr-TR: -match/-eq are culture-sensitive for 'I'/'i').
+    if ($Key -ceq 'JWT_KEY') { return [regex]::IsMatch($Value, 'change-me|dev-only', [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant') }
+    if ($Key -ceq 'MSSQL_SA_PASSWORD') { return ($Value -ceq 'StockAccount!2026') }
+    if ($Key -ceq 'APP_DB_PASSWORD') { return ($Value -ceq 'App!Change-Me-2026') }
     return $false
 }
 
 $lines = if (Test-Path -LiteralPath $envFile) { [IO.File]::ReadAllLines($envFile) } else { [IO.File]::ReadAllLines($example) }
-$generated = @{ JWT_KEY = (New-JwtKey); MSSQL_SA_PASSWORD = (New-SaPassword) }
+$generated = @{ JWT_KEY = (New-JwtKey); MSSQL_SA_PASSWORD = (New-SaPassword); APP_DB_PASSWORD = (New-SaPassword) }
 $seen = @{}
 $out = foreach ($line in $lines) {
-    if ($line -match '^\s*(JWT_KEY|MSSQL_SA_PASSWORD)\s*=\s*(.*)$') {
+    if ($line -cmatch '^\s*(JWT_KEY|MSSQL_SA_PASSWORD|APP_DB_PASSWORD)\s*=\s*(.*)$') {
         $key = $Matches[1]; $value = $Matches[2].Trim()
         $seen[$key] = $true
         if (($Keys -contains $key) -and ($Force -or (Test-Placeholder $key $value))) {

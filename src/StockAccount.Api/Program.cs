@@ -29,7 +29,9 @@ try
     var builder = WebApplication.CreateBuilder(args);
 
     // Fail fast on missing/invalid configuration before anything depends on it (production readiness §2).
-    var configCheck = ConfigurationValidator.Validate(builder.Configuration, builder.Environment);
+    // "--migrate-only": privileged one-shot step (compose service db-migrate): migrate + DB options + app login, then exit.
+    var migrateOnly = args.Contains("--migrate-only", StringComparer.Ordinal);
+    var configCheck = ConfigurationValidator.Validate(builder.Configuration, builder.Environment, migrateOnly);
     foreach (var warning in configCheck.Warnings)
     {
         Log.Warning("CONFIGURATION WARNING: {Warning}", warning);
@@ -53,7 +55,10 @@ try
     builder.Services.AddInfrastructure(builder.Configuration);
     builder.Services.AddScoped<ICurrentUser, HttpCurrentUser>();
     // Schema guard + migrate + seed run in IHostedLifecycleService.StartingAsync, before Kestrel listens.
-    builder.Services.AddHostedService<DatabaseStartupService>();
+    if (!migrateOnly)
+    {
+        builder.Services.AddHostedService<DatabaseStartupService>();
+    }
     var commandTimeout = builder.Configuration.GetValue("Database:CommandTimeoutSeconds", 30);
     builder.Services.ConfigureDbContext<AppDbContext>(o => o.UseSqlServer(sql => sql.CommandTimeout(commandTimeout)));
     builder.Services.AddOptions<JwtOptions>()
@@ -118,6 +123,13 @@ try
     builder.Services.AddApiHealthChecks(builder.Configuration);
 
     var app = builder.Build();
+
+    if (migrateOnly)
+    {
+        await DatabaseInitializer.MigrateOnlyAsync(app.Services, app.Configuration, app.Logger);
+        app.Logger.LogInformation("Migration step completed");
+        return 0;
+    }
 
     var cacheState = app.Services.GetRequiredService<CacheProviderState>();
     if (cacheState is { Enabled: true, UsingRedis: false })

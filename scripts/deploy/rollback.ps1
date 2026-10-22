@@ -40,7 +40,7 @@ try {
         $Version = Get-PreviousVersion $history $current
         if (-not $Version) { throw 'No previous release recorded; pass -Version.' }
     }
-    if ($Version -notmatch $script:VersionPattern) { throw "Invalid version '$Version'." }
+    if ($Version -cnotmatch $script:VersionPattern) { throw "Invalid version '$Version'." }
     foreach ($image in $script:AppImages) {
         if (-not (Test-ImageExists "${image}:$Version")) { throw "image ${image}:$Version not found locally - cannot roll back to $Version." }
     }
@@ -49,7 +49,7 @@ try {
     if ($RestoreDatabase) {
         if (-not $BackupFile) {
             # The backup taken right before the current release was deployed = the database state of the target release.
-            $deployOfCurrent = @($history.releases | Where-Object { $_.version -eq $current -and $_.status -eq 'deployed' }) | Select-Object -Last 1
+            $deployOfCurrent = @($history.releases | Where-Object { $_.version -ceq $current -and $_.status -ceq 'deployed' }) | Select-Object -Last 1
             if ($deployOfCurrent -and $deployOfCurrent.preDeployBackup) { $BackupFile = $deployOfCurrent.preDeployBackup }
         }
         if (-not $BackupFile) { throw 'No pre-deploy backup recorded for the current release; pass -BackupFile <name>.bak.' }
