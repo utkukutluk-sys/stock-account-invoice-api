@@ -96,3 +96,12 @@ Infrastructure Persistence (DB agent) + Identity (UserManager config, Turkish er
   user for 5 minutes — use a throw-away user for lockout tests.
 - **Test (Postman):** refresh/logout rely on the cookie jar (`sa_refresh`, Path=/).
 - **Docker smoke (TS-5):** stop the local `sa-redis` before `docker compose up` (port 6379).
+
+## 6. Fixes after TEST_REPORT (2026-10-22)
+
+| Bug | Fix |
+|---|---|
+| BUG-1 | `CompaniesController`: `AdminOnly` moved from the class to each admin action, so `GET /companies/current` is reachable with `Operator` (class + action policies are AND-combined). Other controllers use class `Operator` + action `AdminOnly`, which correctly yields admin-only. |
+| BUG-2 | `ModelStateProblemFactory`: JSON/model-binding errors → `application/problem+json`, `code: VALIDATION_FAILED`, Turkish messages ("Geçersiz değer veya biçim.", "İstek gövdesi geçerli bir JSON değil."), camelCase field keys, no framework text; the redundant `request` key is dropped (body-level errors use key `body`). |
+| BUG-3 | `SuccessResponseTypeConvention` documents the 2xx schema of every `ActionResult<T>` action; Bearer security is applied per operation only to `[Authorize]` endpoints (no global requirement) and the effective policy is appended to the description. |
+| BUG-5 | Request-completion log lines get `CompanyId` via `IDiagnosticContext` (claim, admin `X-Company-Id`, or `all`). |

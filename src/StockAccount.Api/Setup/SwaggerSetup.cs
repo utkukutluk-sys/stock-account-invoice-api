@@ -30,10 +30,8 @@ public static class SwaggerSetup
                 In = ParameterLocation.Header,
                 Description = "JWT access token (without the 'Bearer ' prefix).",
             });
-            c.AddSecurityRequirement(document => new OpenApiSecurityRequirement
-            {
-                [new OpenApiSecuritySchemeReference("Bearer", document)] = [],
-            });
+            // No global requirement: only [Authorize] operations get Bearer (anonymous auth endpoints stay open).
+            c.OperationFilter<AuthorizeOperationFilter>();
 
             var xml = Path.Combine(AppContext.BaseDirectory, $"{Assembly.GetExecutingAssembly().GetName().Name}.xml");
             if (File.Exists(xml))
@@ -45,6 +43,40 @@ public static class SwaggerSetup
         });
 
         return services;
+    }
+
+    /// <summary>
+    /// Bearer requirement + effective policy text for operations with [Authorize] (class or action) and no [AllowAnonymous];
+    /// policies of class and action are AND-combined, so all are listed.
+    /// </summary>
+    private sealed class AuthorizeOperationFilter : IOperationFilter
+    {
+        public void Apply(OpenApiOperation operation, OperationFilterContext context)
+        {
+            var method = context.MethodInfo;
+            if (method.GetCustomAttributes<AllowAnonymousAttribute>(true).Any())
+            {
+                return;
+            }
+
+            var policies = (method.DeclaringType?.GetCustomAttributes<AuthorizeAttribute>(true) ?? [])
+                .Concat(method.GetCustomAttributes<AuthorizeAttribute>(true))
+                .ToList();
+            if (policies.Count == 0)
+            {
+                return;
+            }
+
+            operation.Security ??= [];
+            operation.Security.Add(new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference("Bearer", context.Document)] = [],
+            });
+
+            var names = policies.Select(p => p.Policy ?? "Authenticated").Distinct().ToList();
+            var effective = names.Contains("AdminOnly") ? "AdminOnly" : string.Join(" + ", names);
+            operation.Description = $"{operation.Description}{(string.IsNullOrEmpty(operation.Description) ? string.Empty : "\n\n")}**Policy:** {effective}".Trim();
+        }
     }
 
     /// <summary>Adds the optional <c>X-Company-Id</c> header to authorized non-auth operations.</summary>

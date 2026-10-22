@@ -4,8 +4,8 @@ using StockAccount.IntegrationTests.Infrastructure;
 namespace StockAccount.IntegrationTests;
 
 /// <summary>
-/// Contract assertions that currently FAIL because of open bugs (docs/TEST_REPORT.md "Bugs"). They are skipped so the suite
-/// stays green; remove the Skip once the owner has fixed the bug. Run them anyway with: set env RUN_KNOWN_BUGS=1.
+/// Regression tests for BUG-1 and BUG-2 (docs/TEST_REPORT.md "Bugs"), fixed by Backend and no longer skipped.
+/// SkippableFact (RUN_KNOWN_BUGS=1) stays available for future open bugs.
 /// </summary>
 [Collection(ApiCollection.Name)]
 public sealed class KnownBugTests(ApiFixture fx)
@@ -13,7 +13,7 @@ public sealed class KnownBugTests(ApiFixture fx)
     private const string Bug1 = "BUG-1 (Backend): GET /api/companies/current returns 403 for operators (class-level AdminOnly + action Operator are AND-combined)";
     private const string Bug2 = "BUG-2 (Backend): model-binding/JSON 400s are application/json with English messages instead of application/problem+json";
 
-    [SkippableFact(Bug1)]
+    [Fact]
     public async Task Operator_companies_current_returns_own_company()
     {
         var op = await fx.OperatorAsync();
@@ -21,7 +21,7 @@ public sealed class KnownBugTests(ApiFixture fx)
         Assert.Equal(fx.DemoCompanyId, c["id"].Int());
     }
 
-    [SkippableFact(Bug2)]
+    [Fact]
     public async Task Json_binding_errors_are_problem_json()
     {
         var op = await fx.OperatorAsync();

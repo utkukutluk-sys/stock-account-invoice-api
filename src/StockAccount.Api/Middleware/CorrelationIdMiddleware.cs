@@ -48,9 +48,28 @@ public sealed class UserLogContextMiddleware(RequestDelegate next)
         }
 
         using (LogContext.PushProperty("UserId", user.FindFirst("sub")?.Value))
-        using (LogContext.PushProperty("CompanyId", user.FindFirst("company_id")?.Value ?? context.Request.Headers["X-Company-Id"].ToString()))
+        using (LogContext.PushProperty("CompanyId", ResolveCompanyId(context)))
         {
             await next(context);
         }
+    }
+
+    /// <summary>company_id claim; for admins the X-Company-Id header, "all" when absent; null for anonymous.</summary>
+    public static string? ResolveCompanyId(HttpContext context)
+    {
+        var user = context.User;
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            return null;
+        }
+
+        var claim = user.FindFirst("company_id")?.Value;
+        if (!string.IsNullOrEmpty(claim))
+        {
+            return claim;
+        }
+
+        var header = context.Request.Headers["X-Company-Id"].ToString();
+        return int.TryParse(header, out var id) ? id.ToString(System.Globalization.CultureInfo.InvariantCulture) : "all";
     }
 }

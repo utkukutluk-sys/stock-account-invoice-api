@@ -15,6 +15,7 @@ public static class ProblemWriter
             ? new ProblemDetails()
             : new ValidationProblemDetails(errors);
         problem.Status = status;
+        problem.Title = TitleFor(status); // ValidationProblemDetails defaults to an English title
         problem.Detail = detail;
         problem.Extensions["code"] = code;
         Enrich(http, problem);

@@ -7,19 +7,21 @@ using StockAccount.Application.Features.Companies.Dtos;
 
 namespace StockAccount.Api.Controllers;
 
-/// <summary>Companies (tenants). Admin only, except <c>/companies/current</c> (CONTRACT §5.5).</summary>
+/// <summary>Companies (tenants). Admin only, except <c>/companies/current</c> (Operator). Policies are per action because
+/// controller- and action-level policies are AND-combined (CONTRACT §5.5).</summary>
 [Route("api/companies")]
 [Tags("Companies")]
-[Authorize(Policy = Policies.AdminOnly)]
 public sealed class CompaniesController(ICompanyService companies) : ApiControllerBase
 {
     /// <summary>Lists companies. Filters: q (name, taxNumber, city), isActive. Sort: name,taxNumber,city,createdAt (default name).</summary>
     [HttpGet]
+    [Authorize(Policy = Policies.AdminOnly)]
     public async Task<ActionResult<PagedResult<CompanyDto>>> List([FromQuery] CompanyListQuery query, CancellationToken cancellationToken) =>
         Ok(await companies.ListAsync(query, cancellationToken));
 
     /// <summary>Gets a company.</summary>
     [HttpGet("{id:int}")]
+    [Authorize(Policy = Policies.AdminOnly)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<CompanyDto>> Get(int id, CancellationToken cancellationToken) =>
         Ok(await companies.GetAsync(id, cancellationToken));
@@ -32,6 +34,7 @@ public sealed class CompaniesController(ICompanyService companies) : ApiControll
 
     /// <summary>Creates a company. 409 DUPLICATE_TAX_NUMBER.</summary>
     [HttpPost]
+    [Authorize(Policy = Policies.AdminOnly)]
     [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<ActionResult<CompanyDto>> Create([FromBody] CompanySaveRequest request, CancellationToken cancellationToken)
     {
@@ -41,11 +44,13 @@ public sealed class CompaniesController(ICompanyService companies) : ApiControll
 
     /// <summary>Updates a company (rowVersion required). 409 CONCURRENCY_CONFLICT / DUPLICATE_TAX_NUMBER.</summary>
     [HttpPut("{id:int}")]
+    [Authorize(Policy = Policies.AdminOnly)]
     public async Task<ActionResult<CompanyDto>> Update(int id, [FromBody] CompanySaveRequest request, CancellationToken cancellationToken) =>
         Ok(await companies.UpdateAsync(id, request, cancellationToken));
 
     /// <summary>Soft-deletes a company. 409 COMPANY_NOT_EMPTY.</summary>
     [HttpDelete("{id:int}")]
+    [Authorize(Policy = Policies.AdminOnly)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
     {

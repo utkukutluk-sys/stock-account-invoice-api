@@ -37,21 +37,17 @@ try
 
     // MVC + JSON (camelCase, enums as strings, UTC DateTimes with Z)
     builder.Services
-        .AddControllers(o => o.Filters.Add<ValidationFilter>())
+        .AddControllers(o =>
+        {
+            o.Filters.Add<ValidationFilter>();
+            o.Conventions.Add(new SuccessResponseTypeConvention());
+        })
         .AddJsonOptions(o =>
         {
             o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
             o.JsonSerializerOptions.Converters.Add(new UtcDateTimeConverter());
         });
-    builder.Services.Configure<ApiBehaviorOptions>(o => o.InvalidModelStateResponseFactory = context =>
-    {
-        var errors = context.ModelState
-            .Where(e => e.Value?.Errors.Count > 0)
-            .GroupBy(e => ProblemWriter.ToCamelPath(e.Key))
-            .ToDictionary(g => g.Key, g => g.SelectMany(e => e.Value!.Errors).Select(e => string.IsNullOrEmpty(e.ErrorMessage) ? "Geçersiz değer." : e.ErrorMessage).ToArray());
-        var problem = ProblemWriter.Create(context.HttpContext, StatusCodes.Status400BadRequest, ErrorCodes.ValidationFailed, GlobalExceptionHandler.ValidationDetail, errors);
-        return new BadRequestObjectResult(problem) { ContentTypes = { "application/problem+json" } };
-    });
+    builder.Services.Configure<ApiBehaviorOptions>(o => o.InvalidModelStateResponseFactory = ModelStateProblemFactory.Create);
 
     builder.Services.AddProblemDetails(o => o.CustomizeProblemDetails = ctx => ProblemWriter.Enrich(ctx.HttpContext, ctx.ProblemDetails));
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
@@ -97,7 +93,9 @@ try
         o.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0} ms";
         o.EnrichDiagnosticContext = (diagnostics, http) =>
         {
+            // Runs when the request completes, i.e. after authentication: user and tenant are known here (BUG-5).
             diagnostics.Set("UserId", http.User.FindFirst("sub")?.Value);
+            diagnostics.Set("CompanyId", UserLogContextMiddleware.ResolveCompanyId(http));
             diagnostics.Set("ClientIp", http.Connection.RemoteIpAddress?.ToString());
             diagnostics.Set("CorrelationId", CorrelationIdMiddleware.Get(http));
         };

@@ -12,7 +12,7 @@ public sealed class AuthorizationMatrixTests(ApiFixture fx)
     {
         // method, url, admin, operator, portal
         { "GET", "/api/companies", "ok", "403", "403" },
-        { "GET", "/api/companies/current", "ok", "any", "403" }, // operator must be "ok" per contract → BUG-1, asserted in KnownBugTests
+        { "GET", "/api/companies/current", "ok", "ok", "403" }, // BUG-1 fixed
         { "POST", "/api/companies", "ok", "403", "403" },
         { "GET", "/api/users", "ok", "403", "403" },
         { "POST", "/api/users", "ok", "403", "403" },
