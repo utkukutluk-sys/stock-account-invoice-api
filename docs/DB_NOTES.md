@@ -156,3 +156,79 @@ Integration test 13 ("tamper Stocks.Balance via SQL") works: only the ledgers ar
 | D9 | Vulnerable transitive package | `Microsoft.Data.SqlClient 6.1.7` pulls `System.Security.Cryptography.Pkcs 9.0.11` (GHSA-2fmv-rv2c-59x7, GHSA-846f-f764-76mx) → pinned 10.0.13 via central transitive pinning (build is warnings-as-errors). |
 | D10 | Extra indexes | `IX_Companies_Name`, `IX_Invoices_CompanyId_CreatedAt` (dashboard recent), `IX_*Trans_CompanyId_TransDate` (global ledger lists), `IX_InvoiceLines_StockId`, `IX_AspNetUsers_CompanyId`. |
 | D11 | Api/launchSettings | Minimal `Program.cs` (migrate + seed + placeholder Identity) and launchSettings on http://localhost:5080 created so the solution builds; Backend owns them now. Test projects are empty shells (template versions of xunit 2.9.3 / runner 3.1.4 / Test.Sdk 17.14.1). |
+| D12 | Restore race with pooled API connections | `SINGLE_USER WITH ROLLBACK IMMEDIATE` alone lets a reconnecting API session take the single slot before RESTORE runs. restore.ps1 sets SINGLE_USER then OFFLINE (nobody can connect), restores, then MULTI_USER. |
+| D13 | COPY_ONLY default | Ad-hoc, pre-deploy and scheduled backups are COPY_ONLY, so they never move a differential base or break a log chain someone else maintains. `-ChainBase` takes a normal full backup. |
+| D14 | Turkish-I in scripts | PowerShell `-match`/`-like` are culture-sensitive. Under tr-TR, `[A-Za-z]` with IgnoreCase does not match `I`, which broke parsing of `DB_EXISTS=` etc. The scripts use only `-cmatch`/`-clike`/ordinal comparisons. Other agents' PowerShell should do the same. |
+| D15 | Requests → Backend | (a) `ALTER DATABASE CURRENT SET AUTO_CLOSE OFF` (Express turns it ON for new DBs; local StockAccountDb is ON). (b) Docker `StockAccountDb` is in FULL recovery with no log backups, so the log only grows: set `RECOVERY SIMPLE` (RPO = backup interval) or add log backups. (c) Connection string values in §8.2. (d) `docker compose stop api` around restore in rollback.ps1, then start the previous image tag. Both (a) and (b) need `suppressTransaction: true` if done in a migration, or can be a one-time ops statement. |
+
+## 8. Production: backups, rollback, connection pooling
+
+### 8.1 Backup / restore scripts (`scripts/db/`)
+| Script | Purpose | Exit codes |
+|---|---|---|
+| `backup.ps1 -Target local\|docker [-Label pre-deploy-1.2.0] [-RetentionCount 14] [-ChainBase] [-LogFile f]` | Full backup, `COPY_ONLY` (unless `-ChainBase`), `CHECKSUM`, `COMPRESSION` when the edition supports it (EngineEdition 2/3; Express = 4 → uncompressed), `RESTORE VERIFYONLY WITH CHECKSUM`, SHA-256, JSON manifest, retention per label family. Returns the manifest object on the pipeline. | 0 ok, 1 failure |
+| `restore.ps1 -Target local\|docker (-File <name> \| -Latest [-Label <label\|family>]) [-Force] [-NoSafetyBackup]` | SHA-256 check against the manifest, then confirmation (type the DB name; non-interactive callers must pass `-Force`). Takes a `pre-restore` safety backup, runs VERIFYONLY + FILELISTONLY, then SINGLE_USER WITH ROLLBACK IMMEDIATE → OFFLINE → `RESTORE WITH REPLACE, CHECKSUM, MOVE` → MULTI_USER. Afterwards it checks `DBCC CHECKDB WITH NO_INFOMSGS`, ONLINE/MULTI_USER, and that the migration head and per-table row counts equal the manifest. `-Latest` skips `pre-restore` backups unless asked. | 0 ok, 1 failure, 2 not confirmed |
+| `migration-head.ps1 -Target local\|docker [-Json]` | Prints the latest `__EFMigrationsHistory.MigrationId` (stdout only). | 0 found, 2 DB/table missing, 1 error |
+| `pool-check.sql` | Read-only ops diagnostics: capacity, sessions per program/host/login/db, idle sessions with open transactions, blocked requests and head blockers, THREADPOOL/lock waits, DB options (AUTO_CLOSE, recovery, RCSI). Run commands are in its header. | – |
+| `register-backup-task.ps1 -Target local\|docker [-At 02:00] [-RetentionCount 14] [-RunWhetherLoggedOn] [-RunNow] [-Unregister]` | Windows Task Scheduler daily job (`\StockAccount\StockAccountDb-Backup-<target>`), label `scheduled`, transcript in `backups\logs\`. Express has no SQL Agent. `-RunWhetherLoggedOn` (S4U) needs an elevated prompt. | 0/1 |
+| `docker-compose.backup.yml` + `backup-loop.sh` | Optional compose sidecar for Linux/compose hosts: `docker compose -f docker-compose.yml -f scripts/db/docker-compose.backup.yml up -d`. Every `BACKUP_INTERVAL` (24h) it takes a COPY_ONLY + CHECKSUM + VERIFYONLY backup and writes the same manifest format; it keeps `BACKUP_RETENTION` (14) scheduled backups. | – |
+
+- **Locations.** docker: `/var/opt/mssql/backup` in the container = `./backups` on the host (bind mount in docker-compose.yml). If the mount is missing, the scripts detect that with a marker-file probe and move files with `docker compose cp`, so they also work against an older running container. local: `<repo>\backups\local`. The SQL Server service account (`NT Service\MSSQL$SQLEXPRESS`) is granted Modify there automatically, because the server process writes the file, not the caller. `backups/` is git-ignored (`backups/.gitignore`).
+- **Naming.** `<db>_<target>_<yyyyMMdd-HHmmss>Z_<label>.bak` + `.json`. The label must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, e.g. `pre-deploy-1.2.0` (no `+build`). The label family (the label without its version suffix) is the retention group, so pre-deploy, scheduled, manual and pre-restore backups each keep their own last N.
+- **Manifest** (`.json`): file, database, target, label, labelFamily, createdAtUtc, sizeBytes, sha256, checksumOk, hasBackupChecksums, copyOnly, compressed, migrationHead, migrationCount, recoveryModel, serverVersion/Edition, rowCounts (per table), host/server path.
+- **Security.** The DB name, labels, file names and paths are regex-validated, then emitted with quote doubling (`N'…'`, `[…]`). There is no free-text SQL from arguments. The SA password comes from `$env:MSSQL_SA_PASSWORD` or `.env` and reaches sqlcmd only through the child's `SQLCMDPASSWORD`; it is never on a command line or in output. For docker, the SQL text travels base64-encoded in an env var (no stdin BOM or quoting problems on PowerShell 5.1). Restore accepts files only from the backup folder (path traversal is rejected) and only if the SHA-256 matches the manifest.
+- **Versions.** Backups restore only into the same or a newer SQL Server major. Local SQLEXPRESS is 17.x (2025) and docker is 16.x (2022), so local → docker does not work; docker → local does.
+- **Runs on** Windows PowerShell 5.1 and PowerShell 7. Local runner: `sqlcmd` if on PATH, else `Invoke-Sqlcmd` (SqlServer/SQLPS module). Docker CLI: `$env:DOCKER_EXE`, PATH, or the Docker Desktop install path.
+
+**For deploy.ps1 / rollback.ps1 (Backend):**
+```powershell
+$headBefore = & "$root\scripts\db\migration-head.ps1" -Target docker              # exit 2 = fresh DB
+$m = & "$root\scripts\db\backup.ps1" -Target docker -Label "pre-deploy-$Version"
+if ($LASTEXITCODE -ne 0) { throw 'pre-deploy backup failed - deploy aborted' }      # $m.file, $m.migrationHead
+# ... deploy; on failure:
+docker compose stop api ui-vue ui-nuxt
+& "$root\scripts\db\restore.ps1" -Target docker -File $m.file -Force               # or -Latest -Label "pre-deploy-$Version"
+if ($LASTEXITCODE -ne 0) { throw 'DB restore failed' }
+# start the previous image tag; check: migration-head.ps1 == $m.migrationHead
+```
+
+### 8.2 Schema rollback policy
+- **Rollback = restore the pre-deploy backup.** No EF down-migrations are run (`Down()` exists but is not part of the process). A down-migration cannot bring back dropped data, and it has not been tested against real data. The restore gives back schema and data exactly as they were.
+- Cost: writes made between the pre-deploy backup and the rollback are lost. The automatic `pre-restore` backup keeps them for manual recovery. Keep that window small: stop or drain the API before the pre-deploy backup if writes must not be lost, and decide on rollback quickly.
+- Prefer **expand/contract migrations** (additive first, destructive in a later release). Then the previous app version still runs on the new schema, and many incidents can be handled by rolling back only the image, without a DB restore.
+- Retention ≥ the number of releases you may need to roll back across (default 14 per family).
+
+### 8.3 Connection pool settings (recommended)
+SqlClient pools per connection string per process. One pooled connection is held per in-flight DB call (milliseconds for this app), so the pool size limits **concurrent DB calls**, not users.
+
+| Keyword | SQL Server Express (local / single API) | Full SQL Server (Standard/Enterprise, docker Developer) | Why |
+|---|---|---|---|
+| `Max Pool Size` | **50** | **100** per API instance (default); keep `instances × Max Pool Size ≤ max_workers_count / 2` (8 cores → 640 workers → ≤ 320) | Express is capped at 4 cores / 1 socket and ~1.4 GB buffer pool, so more than about 50 parallel statements only queue inside SQL Server. A smaller pool fails fast in the app (pool-wait timeout) instead of starving server workers (THREADPOOL waits). |
+| `Min Pool Size` | **5** | **10** | Warm connections after idle periods and restarts. With Express AUTO_CLOSE (turn it OFF, D15) it also avoids reopening the database. |
+| `Connect Timeout` | **15** | **15** (30 across a WAN or for a failover listener) | Also the time a request waits for a free pooled connection. EF's `EnableRetryOnFailure` (5 retries, ≤ 10 s) handles transient failures. |
+| `Command Timeout` | **30** | **30** | Same as `Database:CommandTimeoutSeconds`. Set it in one place only; EF's `CommandTimeout` wins when both exist. Use 300 s for `MigrateAsync` only (`Database.SetCommandTimeout`). |
+| `Application Name` | `StockAccount.Api` | `StockAccount.Api` (+ `-worker` for separate processes) | Shows up as `program_name` in `pool-check.sql`. Without it EF Core 10 reports `EFCore/10.0.13 (...)`. |
+| `ConnectRetryCount` / `ConnectRetryInterval` | 3 / 10 | 3 / 10 | Idle-connection resiliency after network blips. |
+| `Pooling`, `MultipleActiveResultSets` | true, False | true, False | MARS is not needed and costs extra. |
+| `Encrypt` / `TrustServerCertificate` | True / True (local dev) | **True / False with a real certificate** (compose internal network: True/True acceptable) | |
+| `Load Balance Timeout` (Connection Lifetime) | 0 | 0 (300 behind an AG listener so connections rebalance) | |
+
+Example (docker / full SQL Server):
+`Server=mssql,1433;Database=StockAccountDb;User Id=stockaccount_app;Password=…;Encrypt=True;TrustServerCertificate=True;Application Name=StockAccount.Api;Max Pool Size=100;Min Pool Size=10;Connect Timeout=15;Command Timeout=30;ConnectRetryCount=3;ConnectRetryInterval=10;MultipleActiveResultSets=False`
+
+Also:
+- **Do not use `sa` in production.** Use an app login with `db_datareader`, `db_datawriter` and `EXECUTE`, and run migrations with a separate owner/ddladmin login (or a `MigrateOnStartup=false` deploy step). Backups need `db_backupoperator` (restore needs `dbcreator`/sysadmin), so the scripts keep using sa/Windows admin.
+- No `AddDbContextPool`: the audit interceptor resolves the scoped `ICurrentUser`. DbContext pooling is not connection pooling, and connection pooling is on regardless.
+- **Pool exhaustion** shows as `InvalidOperationException: Timeout expired ... obtaining a connection from the pool`. Run `pool-check.sql`: compare the session count per program with Max Pool Size, then check for sleeping sessions with `open_tran > 0` (leaked transaction) and for blocking chains.
+- After a restore, pooled connections are dead. SqlClient drops them on first use and EF retries (drill: API Healthy and login 200 right after the restore), but restarting the API is cleaner.
+- Express limits to plan for: max database size 10 GB on SQL Server 2022 Express and 50 GB on SQL Server 2025 Express (local is 17.x); compute is the lesser of 1 socket / 4 cores; ~1.4 GB buffer pool. Move to Standard well before the size cap.
+
+### 8.4 Drill evidence (2026-10-22)
+| Drill | Result |
+|---|---|
+| local SQLEXPRESS: backup `drill-1` → change ELMA name + delete 80 refresh tokens → `restore -Latest -Label drill` (non-interactive without `-Force` → exit 2 and nothing changed; with `-Force` → exit 0) | ELMA name and 80 tokens back; CHECKDB clean; 16 tables / 275 rows = manifest; pre-restore safety backup created |
+| docker stack (./backups not yet mounted → `docker compose cp` fallback): backup `pre-deploy-0.0.1-drill` (compressed, Developer) → change ELMA → `restore -Latest -Label pre-deploy -Force` | restored; CHECKDB clean; head `20261021180606_InitialCreate` = manifest; API `/health` Healthy and login 200 without a restart |
+| temporary container from the same image with the `./backups` bind mount: restore into an empty server (MOVE to instance defaults), backup on the mounted dir, `restore -Latest` | all exit 0, no copy step needed |
+| compose sidecar (`docker-compose.backup.yml`, interval 20 s, keep 2) | 4 backups, retention removed the oldest 2; `restore -Latest -Label scheduled` from the sidecar manifest OK |
+| Task Scheduler (`register-backup-task.ps1 -RunNow`, then `-Unregister`) | scheduled backup + transcript written |
+| Negative tests | tampered .bak → SHA-256 mismatch, aborted before touching the DB; `-File ..\..\Windows\evil.bak` → rejected; DB name `x];DROP DATABASE y;--` → rejected by validation; retention keep 2 → oldest removed |

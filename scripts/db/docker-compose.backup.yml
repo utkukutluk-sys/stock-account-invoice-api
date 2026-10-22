@@ -1,0 +1,35 @@
+# Optional scheduled backups for the compose stack (override file, owned by the DB agent).
+#
+#   docker compose -f docker-compose.yml -f scripts/db/docker-compose.backup.yml up -d
+#
+# Adds a small "mssql-backup" sidecar (same SQL Server image, only its sqlcmd is used) that every
+# BACKUP_INTERVAL (default 24h) runs a COPY_ONLY + CHECKSUM backup with RESTORE VERIFYONLY, writes the same
+# .json manifest as scripts/db/backup.ps1 and keeps the newest BACKUP_RETENTION (default 14) "scheduled"
+# backups. Files land in ./backups on the host; restore with
+#   ./scripts/db/restore.ps1 -Target docker -Latest -Label scheduled
+# Settings come from .env: BACKUP_INTERVAL (e.g. 6h, 24h), BACKUP_RETENTION, BACKUP_FIRST_DELAY.
+# Relative paths resolve against the project directory (the repo root).
+services:
+  mssql:
+    volumes:
+      # Same mount the main compose file declares; repeated so this override also works on its own.
+      - ./backups:/var/opt/mssql/backup
+
+  mssql-backup:
+    # Same pinned image as the mssql service (provides /opt/mssql-tools18/bin/sqlcmd); SQL Server itself is not started.
+    image: mcr.microsoft.com/mssql/server:2022-latest@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
+    entrypoint: ["/bin/bash", "/opt/stockaccount/backup-loop.sh"]
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?MSSQL_SA_PASSWORD is required}
+      DB_NAME: StockAccountDb
+      SQL_HOST: mssql
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-24h}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
+      BACKUP_FIRST_DELAY: ${BACKUP_FIRST_DELAY:-120s}
+    volumes:
+      - ./backups:/var/opt/mssql/backup
+      - ./scripts/db/backup-loop.sh:/opt/stockaccount/backup-loop.sh:ro
+    depends_on:
+      mssql:
+        condition: service_healthy
+    restart: unless-stopped
