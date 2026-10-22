@@ -90,7 +90,7 @@ catch {
 
     if (-not $NoAutoRollback -and $previous -and $previous -ne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
         Write-Deploy "automatic rollback to $previous" 'Yellow'
-        $rollbackArgs = @{ Version = $previous; Reason = "auto: deploy of $Version failed" }
+        $rollbackArgs = @{ Version = $previous; From = $Version; Reason ="auto: deploy of $Version failed" }
         if ($backupFile) { $rollbackArgs.RestoreDatabase = $true; $rollbackArgs.BackupFile = $backupFile }
         & (Join-Path $PSScriptRoot 'rollback.ps1') @rollbackArgs
         if ($LASTEXITCODE -ne 0) { Write-Deploy 'AUTOMATIC ROLLBACK FAILED - manual intervention required' 'Red' }

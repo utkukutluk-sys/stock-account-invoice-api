@@ -23,14 +23,16 @@ param(
     [string]$BackupFile,
     [int]$ReadyTimeoutSeconds = 240,
     [string]$HealthUrl = 'http://localhost:5080/health/ready',
-    [string]$Reason = 'manual'
+    [string]$Reason = 'manual',
+    # Version being replaced (deploy.ps1 passes the failed version); default: the recorded current release.
+    [string]$From
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deploy-common.ps1')
 
 $history = Read-History
-$current = $history.current
+$current = if ($From) { $From } else { $history.current }
 $started = Get-Date
 
 try {
@@ -61,6 +63,11 @@ try {
         & $restoreScript -Target docker -File $BackupFile -Force
         if ($LASTEXITCODE -ne 0) { throw "database restore from $BackupFile FAILED" }
         Write-Deploy 'database restored' 'Green'
+
+        # Cached DTOs/lists describe the pre-restore database: drop every API key (instance prefix sa:) so nothing stale is served.
+        Write-Deploy 'flushing API cache keys (sa:*) in Redis'
+        Invoke-Docker @('compose', 'exec', '-T', 'redis', 'sh', '-c', "redis-cli --scan --pattern 'sa:*' | xargs -r redis-cli del") | Out-Null
+        if ($script:LastDockerExit -ne 0) { throw 'Redis cache flush failed after the database restore' }
     }
 
     $env:APP_VERSION = $Version

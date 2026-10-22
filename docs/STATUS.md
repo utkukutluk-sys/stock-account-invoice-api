@@ -20,9 +20,9 @@ Notes: record deviations from CONTRACT, `REQUEST → <agent>: ...` for cross-are
 | BE-5 | Invoices CRUD, approve, cancel, numbering | Backend | Done | Execution strategy + single SaveChanges + retry x3; GrandTotal 0 → no ActTrans (coordinator). Inactive stock/account rejected already on save (422) |
 | BE-6 | Transactions, dashboard, portal endpoints | Backend | Done | act-trans sort excludes quantity (no such field) |
 | BE-7 | Reconciliation BackgroundService + admin endpoint | Backend | Done | Uses DB views; Reconciliation:InitialDelaySeconds added |
-| BE-8 | Serilog, correlation id, CORS, Swagger, ETag, health | Backend | Done | ETag as middleware; Redis failure = Degraded (200), only SQL → 503; Swashbuckle 10.3.1 OK on net10; BUG-3 fixed (2xx schemas, per-op Bearer), BUG-5 fixed (CompanyId on request logs) |
+| BE-8 | Serilog, correlation id, CORS, Swagger, ETag, health | Backend | Done | ETag as middleware; Redis failure = Degraded (200), only SQL → 503; Swashbuckle 10.3.1 OK on net10; BUG-3 fixed (2xx schemas, per-op Bearer), BUG-5 fixed (CompanyId on request logs); PROD: rate limiting (429 RATE_LIMITED), fail-fast config, security headers, /health/live + /health/ready |
 | BE-9 | Startup migrate + seed + approve opening invoice | Backend | Done | Seed opening invoice approved via IInvoiceService → ALS000001, ELMA 100, S001 −18714.00 |
-| BE-10 | API Dockerfile, docker-compose.yml, .env.example | Backend | Done | docker compose build api OK; compose smoke (mssql+redis+api) passed Ahmet scenario; UI services not run by Backend |
+| BE-10 | API Dockerfile, docker-compose.yml, .env.example | Backend | Done | docker compose build api OK; compose smoke (mssql+redis+api) passed Ahmet scenario; UI services not run by Backend; PROD: versioned images, pinned mssql/redis, deploy.ps1/rollback.ps1 drill OK (BACKEND_NOTES §7) |
 | BE-11 | README.md | Backend | Done | |
 | FE-1 | ui-vue scaffold, layout, types, http client + cache | Frontend | Done | Vite 8 + PrimeVue 4.5 Aura; client cache w/ ETag, LRU, de-dup; 74 Vitest tests; see FRONTEND_NOTES.md |
 | FE-2 | Login, auth store, guards, refresh, 403/404, profile | Frontend | Done | in-memory token, single-flight refresh + 500 ms grace retry; X-Company-Id header for admin |
