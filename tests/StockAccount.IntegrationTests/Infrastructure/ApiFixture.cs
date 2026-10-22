@@ -52,9 +52,9 @@ public sealed class ApiFixture : IAsyncLifetime
     }
 
     /// <summary>Another host on the same database with different settings (e.g. Jwt:RefreshReuseGraceSeconds=0).</summary>
-    public ApiFactory CreateFactory(IReadOnlyDictionary<string, string?> overrides)
+    public ApiFactory CreateFactory(IReadOnlyDictionary<string, string?> overrides, Action<Microsoft.Extensions.DependencyInjection.IServiceCollection>? configureServices = null)
     {
-        var f = new ApiFactory(ConnectionString, overrides);
+        var f = new ApiFactory(ConnectionString, overrides, configureServices);
         extraFactories.Add(f);
         return f;
     }

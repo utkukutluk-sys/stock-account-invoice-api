@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "test": "playwright test",
-    "test:vue": "cross-env E2E_UI=vue playwright test --project=vue",
-    "test:nuxt": "cross-env E2E_UI=nuxt playwright test --project=nuxt",
-    "test:docker": "cross-env E2E_EXTERNAL=1 playwright test --project=vue --project=nuxt --grep @smoke",
+    "test:vue": "cross-env E2E_UI=vue playwright test --project=vue --project=vue-mobile",
+    "test:nuxt": "cross-env E2E_UI=nuxt playwright test --project=nuxt --project=nuxt-mobile",
+    "test:docker": "cross-env E2E_EXTERNAL=1 playwright test --grep @smoke",
     "report": "playwright show-report"
   },
   "devDependencies": {

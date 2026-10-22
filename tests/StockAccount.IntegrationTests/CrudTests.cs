@@ -116,7 +116,7 @@ public sealed class CrudTests(ApiFixture fx)
 
         await ApiSession.ExpectProblemAsync(await op.PostAsync("/api/stocks", TestData.StockBody(raw.Trim())), HttpStatusCode.Conflict, "DUPLICATE_CODE");
         await ApiSession.ExpectProblemAsync(await op.PostAsync("/api/stocks", TestData.StockBody("BAD CODE!")), HttpStatusCode.BadRequest, "VALIDATION_FAILED");
-        await ApiSession.ExpectProblemAsync(await op.PostAsync("/api/stocks", new { code = TestData.Code(), name = "x", unit = "Ton", vatRate = 1, unitPrice = 1, isActive = true }), HttpStatusCode.BadRequest, "VALIDATION_FAILED", strictContentType: false); // content type: see KnownBugTests (BUG-2)
+        await ApiSession.ExpectProblemAsync(await op.PostAsync("/api/stocks", new { code = TestData.Code(), name = "x", unit = "Ton", vatRate = 1, unitPrice = 1, isActive = true }), HttpStatusCode.BadRequest, "VALIDATION_FAILED"); // BUG-2 fixed: strict problem+json
 
         var id = created["id"].Int();
         var got = await op.GetJsonAsync($"/api/stocks/{id}");

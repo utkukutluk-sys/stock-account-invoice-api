@@ -277,11 +277,15 @@ const scenario = folder('Scenario – Ahmet Elma', 'Reference scenario (CONTRACT
   req('14. Reversal rows present', 'GET', '/stock-trans?invoiceId={{ahmetInvoiceId}}', { auth: 'operatorToken', tests: [status(200), "pm.test('Out + reversal In', () => { const it = pm.response.json().items; pm.expect(it).to.have.length(2); pm.expect(it.some(r => r.isReversal && r.direction === 'In')).to.be.true; });"] }),
 ]);
 
-const knownBugs = folder('Known bugs', 'Contract assertions for open bugs (docs/TEST_REPORT.md). Skipped unless the environment variable runKnownBugs = true.', [
-  req('BUG-1 Operator GET /companies/current → 200', 'GET', '/companies/current', { auth: 'operatorToken', tests: [
-    "const run = pm.environment.get('runKnownBugs') === 'true';",
-    "(run ? pm.test : pm.test.skip)('BUG-1: operator gets own company (contract §5.5)', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().id).to.eql(Number(pm.collectionVariables.get('demoCompanyId'))); });",
-  ] }),
+const knownBugs = folder('Regression – fixed bugs', 'Regression checks for bugs found by the Test agent and fixed (docs/TEST_REPORT.md).', [
+  req('BUG-1 Operator GET /companies/current → 200', 'GET', '/companies/current', { auth: 'operatorToken', tests: [status(200),
+    "pm.test('BUG-1: operator gets own company (contract §5.5)', () => pm.expect(pm.response.json().id).to.eql(Number(pm.collectionVariables.get('demoCompanyId'))));"] }),
+  req('BUG-2 Bad enum → problem+json, Turkish', 'POST', '/stocks', { auth: 'operatorToken', body: { code: 'BUG2X', name: 'x', unit: 'Ton', vatRate: 1, unitPrice: 1, isActive: true }, tests: [...problem('VALIDATION_FAILED', 400),
+    "pm.test('BUG-2: no framework English text', () => pm.expect(pm.response.text()).not.to.include('could not be converted'));"] }),
+  req('BUG-3 Swagger: anonymous login has no security, approve has 200', 'GET', '/swagger/v1/swagger.json', { host: '{{hostUrl}}', auth: 'none', tests: [status(200),
+    "const d = pm.response.json();",
+    "pm.test('BUG-3: login anonymous', () => pm.expect((d.paths['/api/auth/login'].post.security || d.security || []).length).to.eql(0));",
+    "pm.test('BUG-3: approve documents 200', () => pm.expect(d.paths['/api/invoices/{id}/approve'].post.responses).to.have.property('200'));"] }),
 ]);
 
 const collection = {

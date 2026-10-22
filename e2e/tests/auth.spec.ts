@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { gotoPage, isNuxt, USERS, login, logout } from './helpers';
+import { gotoPage, USERS, login, logout } from './helpers';
 
 // CONTRACT §11.4 #1, #6, #7: login/logout, role-based menu, guards.
 test.describe('auth & role-based menu', () => {
-  test('invalid login shows error; admin login lands on dashboard @smoke', async ({ page }, testInfo) => {
+  test('invalid login shows error; admin login lands on dashboard @smoke', async ({ page }) => {
     await gotoPage(page, '/login');
     await expect(page.getByTestId('page-title')).toHaveText('Giriş');
     await page.getByTestId('login-email').fill(USERS.admin.email);
@@ -21,10 +21,7 @@ test.describe('auth & role-based menu', () => {
     await expect(page.getByTestId('nav-my-account')).toHaveCount(0);
     await expect(page.getByTestId('company-switcher')).toBeVisible();
 
-    // Nuxt: logging out on the same document as a client-side login freezes the page (BUG-4, separate test below),
-    // so do a full SSR load first to still verify logout itself.
-    if (isNuxt(testInfo)) await gotoPage(page, '/');
-    await logout(page);
+    await logout(page); // BUG-4 fixed: no full reload needed before logout on Nuxt
     // after logout guarded routes redirect to login with redirect param
     await gotoPage(page, '/stocks');
     await expect(page).toHaveURL(/\/login\?redirect=/);

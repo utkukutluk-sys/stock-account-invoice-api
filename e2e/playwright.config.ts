@@ -65,8 +65,11 @@ export default defineConfig({
     navigationTimeout: 30_000,
   },
   projects: [
-    { name: 'vue', use: { ...devices['Desktop Chrome'], baseURL: vueUrl } },
-    { name: 'nuxt', use: { ...devices['Desktop Chrome'], baseURL: nuxtUrl } },
+    { name: 'vue', testIgnore: /mobile.spec.ts/, use: { ...devices['Desktop Chrome'], baseURL: vueUrl } },
+    { name: 'nuxt', testIgnore: /mobile.spec.ts/, use: { ...devices['Desktop Chrome'], baseURL: nuxtUrl } },
+    // phone viewport smoke (Chromium device emulation)
+    { name: 'vue-mobile', testMatch: /mobile.spec.ts/, use: { ...devices['Pixel 7'], baseURL: vueUrl } },
+    { name: 'nuxt-mobile', testMatch: /mobile.spec.ts/, use: { ...devices['Pixel 7'], baseURL: nuxtUrl } },
   ],
   webServer,
 });
