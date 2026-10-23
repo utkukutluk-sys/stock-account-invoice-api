@@ -1,3 +1,5 @@
+[![CI](https://github.com/utkukutluk-sys/stock-account-invoice-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/utkukutluk-sys/stock-account-invoice-api/actions/workflows/ci.yml)
+
 # Stok, Cari ve Fiş Yönetimi — Web API + UI
 
 Stok, Cari ve Fiş (fatura) hizmetleri sunan bir **.NET 10 Web API** ve bu API'yi kullanan iki ön yüz:
