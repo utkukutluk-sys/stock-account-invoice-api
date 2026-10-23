@@ -606,7 +606,7 @@ function Invoke-OffsiteContainer {
         RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY = $Config.SecretKey
         RCLONE_CONFIG_OFFSITE_ENDPOINT          = $Config.Endpoint
         RCLONE_CONFIG_OFFSITE_REGION            = $Config.Region
-        RCLONE_CONFIG_OFFSITE_PROVIDER          = $(if ($Config.Endpoint) { 'Other' } else { 'AWS' })
+        RCLONE_CONFIG_OFFSITE_PROVIDER          = $(if (-not $Config.Endpoint) { 'AWS' } elseif ($Config.Endpoint -cmatch '\.r2\.cloudflarestorage\.com') { 'Cloudflare' } else { 'Other' })
         RCLONE_CONFIG_OFFSITE_NO_CHECK_BUCKET   = 'true'
         OFFSITE_S3_BUCKET                       = $Config.Bucket
         OFFSITE_PREFIX                          = $Config.Prefix

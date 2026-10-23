@@ -26,9 +26,11 @@ fail_cfg() { log "invalid configuration: $*"; exit 2; }
 # rclone must not look for / print a config file; real settings come from RCLONE_CONFIG_OFFSITE_* only.
 : > /tmp/rclone.conf
 export RCLONE_CONFIG=/tmp/rclone.conf
-# AWS proper: no endpoint, provider AWS. Everything else (B2, R2, Hetzner, MinIO ...): provider Other.
+# AWS proper: no endpoint, provider AWS. Cloudflare R2: provider Cloudflare. Everything else (B2, Hetzner, MinIO ...): Other.
 if [ -z "${RCLONE_CONFIG_OFFSITE_ENDPOINT:-}" ]; then
     export RCLONE_CONFIG_OFFSITE_PROVIDER="${RCLONE_CONFIG_OFFSITE_PROVIDER:-AWS}"
+elif printf '%s' "$RCLONE_CONFIG_OFFSITE_ENDPOINT" | grep -q '\.r2\.cloudflarestorage\.com'; then
+    export RCLONE_CONFIG_OFFSITE_PROVIDER="${RCLONE_CONFIG_OFFSITE_PROVIDER:-Cloudflare}"
 else
     export RCLONE_CONFIG_OFFSITE_PROVIDER="${RCLONE_CONFIG_OFFSITE_PROVIDER:-Other}"
 fi
