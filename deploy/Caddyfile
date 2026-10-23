@@ -1,0 +1,34 @@
+# Caddy: the ONLY public entry point (ports 80/443). Terminates TLS and proxies everything to the Vue UI (nginx), which
+# serves the SPA and proxies /api to the API. Environment (set by docker-compose.prod.yml from .env):
+#   DOMAIN     public host name, e.g. app.example.com (DNS A record -> this server)
+#   TLS_MODE   the argument of the "tls" directive: the Let's Encrypt e-mail (ACME_EMAIL, default) or the word
+#              "internal" (LOCAL_TLS=internal: Caddy's own local CA, for local tests with DOMAIN=localhost)
+#
+# Client IP: no upstream proxy is trusted (no trusted_proxies), so the TCP peer IS the client. Caddy therefore sets
+# X-Forwarded-For to that address and discards anything the client sent - the header cannot be spoofed from outside.
+{$DOMAIN} {
+	tls {$TLS_MODE}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# nginx (ui-vue) adds CSP, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy and COOP itself.
+	reverse_proxy ui-vue:80 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up -X-Real-IP
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 60s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

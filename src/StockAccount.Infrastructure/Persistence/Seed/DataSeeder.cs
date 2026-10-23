@@ -82,7 +82,7 @@ public static class DataSeeder
         await SeedOpeningInvoiceAsync(db, company.Id, stocks, accounts["S001"], logger, cancellationToken);
     }
 
-    private static async Task SeedRolesAsync(AppDbContext db, CancellationToken ct)
+    public static async Task SeedRolesAsync(AppDbContext db, CancellationToken ct)
     {
         foreach (var roleName in Roles.All)
         {

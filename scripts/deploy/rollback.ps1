@@ -22,7 +22,9 @@ param(
     [switch]$RestoreDatabase,
     [string]$BackupFile,
     [int]$ReadyTimeoutSeconds = 240,
-    [string]$HealthUrl = 'http://localhost:5080/health/ready',
+    [string]$HealthUrl,
+    # Production stack (docker-compose.prod.yml). Detected automatically when the last deploy was a -Production one.
+    [switch]$Production,
     [string]$Reason = 'manual',
     # Version being replaced (deploy.ps1 passes the failed version); default: the recorded current release.
     [string]$From
@@ -32,6 +34,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deploy-common.ps1')
 
 $history = Read-History
+if (-not $Production -and ($history.PSObject.Properties.Name -contains 'production') -and $history.production) { $Production = [switch]$true }
+Set-ComposeFiles -ProductionMode:$Production
+if (-not $HealthUrl) { $HealthUrl = if ($Production) { 'internal' } else { 'http://localhost:5080/health/ready' } }
 $current = if ($From) { $From } else { $history.current }
 $started = Get-Date
 
@@ -54,7 +59,7 @@ try {
         }
         if (-not $BackupFile) { throw 'No pre-deploy backup recorded for the current release; pass -BackupFile <name>.bak.' }
 
-        $restoreScript = Join-Path $script:RepoRoot 'scripts\db\restore.ps1'
+        $restoreScript = [IO.Path]::Combine($script:RepoRoot, 'scripts', 'db', 'restore.ps1')
         if (-not (Test-Path -LiteralPath $restoreScript)) { throw "restore script missing: $restoreScript" }
 
         # BUG-12: a failed deploy may have stopped/recreated mssql+redis: make sure they run and are healthy before any exec.

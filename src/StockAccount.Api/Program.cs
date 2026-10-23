@@ -127,7 +127,7 @@ try
 
     if (migrateOnly)
     {
-        await DatabaseInitializer.MigrateOnlyAsync(app.Services, app.Configuration, app.Logger);
+        await DatabaseInitializer.MigrateOnlyAsync(app.Services, app.Configuration, app.Logger, requireAdmin: app.Environment.IsProduction());
         app.Logger.LogInformation("Migration step completed");
         return 0;
     }
@@ -199,6 +199,11 @@ catch (Microsoft.Extensions.Options.OptionsValidationException ex)
 {
     Log.Fatal("Invalid configuration, the API will not start: {Errors}", string.Join("; ", ex.Failures));
     return 2;
+}
+catch (BootstrapConfigurationException ex)
+{
+    Log.Fatal("Admin bootstrap failed: {Error}", ex.Message);
+    return 4;
 }
 catch (DatabaseSchemaMismatchException ex)
 {

@@ -41,10 +41,18 @@ public static class DatabaseInitializer
 
     /// <summary>
     /// Migrator mode (<c>--migrate-only</c>, compose service <c>db-migrate</c> running with the privileged connection):
-    /// schema guard, migrate, database options and the least-privilege app login. No seed; the API seeds as the app user.
+    /// schema guard, migrate, database options and the least-privilege app login, then (only when Database:Seed is off) the
+    /// one-time admin bootstrap (<see cref="AdminBootstrapper"/>; mandatory when <paramref name="requireAdmin"/>, i.e. Production).
     /// </summary>
-    public static Task MigrateOnlyAsync(IServiceProvider services, IConfiguration configuration, ILogger logger, CancellationToken cancellationToken = default) =>
-        MigrateWithRetryAsync(services, configuration, logger, cancellationToken);
+    public static async Task MigrateOnlyAsync(
+        IServiceProvider services, IConfiguration configuration, ILogger logger, bool requireAdmin = false, CancellationToken cancellationToken = default)
+    {
+        await MigrateWithRetryAsync(services, configuration, logger, cancellationToken);
+        if (!configuration.GetValue("Database:Seed", false))
+        {
+            await AdminBootstrapper.EnsureAsync(services, configuration, requireAdmin, logger, cancellationToken);
+        }
+    }
 
     private static async Task MigrateWithRetryAsync(IServiceProvider services, IConfiguration configuration, ILogger logger, CancellationToken cancellationToken)
     {

@@ -9,7 +9,11 @@ RUN npm run build && npm test
 
 # ---- runtime: nginx serves the SPA and proxies /api to the API service (CONTRACT §8.1) ----
 FROM nginx:1.27-alpine AS runtime
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf is an envsubst template (official image entrypoint): only TRUSTED_* variables are substituted, so nginx's own
+# $variables stay untouched. TRUSTED_PROXY_IP = the reverse proxy (caddy) allowed to set the client IP; compose overrides it.
+ENV NGINX_ENVSUBST_FILTER=^TRUSTED_ \
+    TRUSTED_PROXY_IP=172.30.0.20
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80

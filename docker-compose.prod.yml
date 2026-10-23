@@ -1,0 +1,129 @@
+# Production override for a single Linux VPS. Use it ON TOP of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# (scripts/deploy/deploy.ps1 -Production does this for you). Full guide: docs/DEPLOYMENT.md.
+#
+# What changes compared to the dev/demo stack:
+#   - ASPNETCORE_ENVIRONMENT=Production (strict config validation, no placeholder secrets), no demo seed, Swagger off,
+#     production rate limits.
+#   - NO host ports for api / mssql / redis / ui-vue. The only public ports are Caddy's 80/443 (HTTPS, Let's Encrypt).
+#   - ui-nuxt is not run (profile "nuxt"); only the Vue UI is public.
+#   - Uptime Kuma listens on 127.0.0.1:3001 only (reach it with an SSH tunnel).
+# Client IP chain: client -> caddy (172.30.0.20) -> ui-vue nginx (172.30.0.10, real_ip from caddy only) -> api (trusts
+# only 172.30.0.10). NET_PREFIX (default 172.30.0) exists only so a second copy can run next to another stack.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  mssql:
+    ports: !reset []
+    logging: *default-logging
+    environment:
+      # Developer edition is NOT licensed for production use: Express is free (10 GB per database, plenty to start).
+      # Set MSSQL_PID=Standard/Enterprise only with a license.
+      MSSQL_PID: ${MSSQL_PID:-Express}
+    volumes:
+      - mssql-data:/var/opt/mssql
+      # Backups written by scripts/db/backup.ps1 -Target docker. BACKUP_DIR must be writable by uid 10001 (docs/DEPLOYMENT.md).
+      - ${BACKUP_DIR:-./backups}:/var/opt/mssql/backup
+
+  redis:
+    ports: !reset []
+    logging: *default-logging
+
+  db-migrate:
+    logging: *default-logging
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Database__Seed: "false"
+      # One-time first admin (created only when no Admin exists; in Production the step FAILS if none exists and these are unset).
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      BOOTSTRAP_COMPANY_NAME: ${BOOTSTRAP_COMPANY_NAME:-}
+      BOOTSTRAP_COMPANY_TAX_NUMBER: ${BOOTSTRAP_COMPANY_TAX_NUMBER:-}
+
+  api:
+    ports: !reset []
+    logging: *default-logging
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Database__Seed: "false"
+      Swagger__Enabled: "false"
+      RateLimiting__Enabled: "true"
+      RateLimiting__Global__PermitLimit: ${RATE_LIMIT_GLOBAL_PERMIT:-300}
+      RateLimiting__Global__WindowSeconds: "60"
+      RateLimiting__Auth__PermitLimit: ${RATE_LIMIT_AUTH_PERMIT:-10}
+      RateLimiting__Auth__WindowSeconds: "60"
+      # Only the ui-vue nginx may set X-Forwarded-For (index 1 would be ui-nuxt, which does not run: pin it to ui-vue too).
+      ForwardedHeaders__KnownProxies__0: ${NET_PREFIX:-172.30.0}.10
+      ForwardedHeaders__KnownProxies__1: ${NET_PREFIX:-172.30.0}.10
+      ForwardedHeaders__ForwardLimit: "1"
+      # Same-origin deployment: the browser talks to https://DOMAIN only (CORS is not used).
+      Cors__AllowedOrigins__0: https://${DOMAIN:?DOMAIN is required (public host name, e.g. app.example.com)}
+      Cors__AllowedOrigins__1: https://${DOMAIN}
+
+  ui-vue:
+    ports: !reset []
+    logging: *default-logging
+    environment:
+      # The only proxy whose X-Forwarded-For nginx believes (see ui-vue/nginx.conf).
+      TRUSTED_PROXY_IP: ${NET_PREFIX:-172.30.0}.20
+    networks:
+      default:
+        ipv4_address: ${NET_PREFIX:-172.30.0}.10
+
+  # Not run in production (stays in the repo). "docker compose --profile nuxt up ui-nuxt" would start it.
+  ui-nuxt:
+    profiles: ["nuxt"]
+    ports: !reset []
+
+  caddy:
+    # Pinned: Caddy 2.10.2 (alpine).
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"   # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required (public host name, e.g. app.example.com)}
+      # "tls <email>" = Let's Encrypt (automatic certificate + renewal); LOCAL_TLS=internal = local CA (tests only).
+      TLS_MODE: ${LOCAL_TLS:-${ACME_EMAIL:-}}   # empty = caddy refuses to start; deploy.ps1 -Production checks ACME_EMAIL first
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # certificates + ACME account: must persist (Let's Encrypt rate limits)
+      - caddy-config:/config
+    networks:
+      default:
+        ipv4_address: ${NET_PREFIX:-172.30.0}.20
+    depends_on:
+      - ui-vue
+    logging: *default-logging
+    restart: unless-stopped
+
+  uptime-kuma:
+    # Pinned: Uptime Kuma 1.23.16. Reachable only from the server itself: ssh -L 3001:127.0.0.1:3001 user@server
+    image: louislam/uptime-kuma:1.23.16@sha256:431fee3be822b04861cf0e35daf4beef6b7cb37391c5f26c3ad6e12ce280fe18
+    ports:
+      - "127.0.0.1:${UPTIME_KUMA_PORT:-3001}:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+    networks: [default]
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config: !override
+        - subnet: ${NET_PREFIX:-172.30.0}.0/24
+          gateway: ${NET_PREFIX:-172.30.0}.1
+          ip_range: ${NET_PREFIX:-172.30.0}.128/25   # dynamic addresses; .10 ui-vue, .20 caddy are fixed
+
+volumes:
+  mssql-data:
+  caddy-data:
+  caddy-config:
+  uptime-kuma-data:

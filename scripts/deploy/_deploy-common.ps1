@@ -1,9 +1,13 @@
-# Shared helpers for scripts/deploy/*.ps1 (dot-sourced). Windows PowerShell 5.1 and PowerShell 7 compatible.
+# Shared helpers for scripts/deploy/*.ps1 (dot-sourced). Windows PowerShell 5.1 and PowerShell 7 (Windows + Linux) compatible:
+# no backslash paths (Join-Path only), no Windows-only cmdlets, ordinal comparisons.
 Set-StrictMode -Version 3.0
 
-$script:RepoRoot    = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$script:StateDir    = Join-Path $PSScriptRoot '.state'
+$script:RepoRoot    = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
+# DEPLOY_STATE_DIR / COMPOSE_PROJECT_NAME let a second stack (e.g. a local production test) keep its own release history.
+$script:StateDir    = if ($env:DEPLOY_STATE_DIR) { $env:DEPLOY_STATE_DIR } else { Join-Path $PSScriptRoot '.state' }
 $script:HistoryFile = Join-Path $script:StateDir 'releases.json'
+$script:ComposeProject = if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { 'stockaccount' }
+$script:ProdMode  = $false
 $script:AppImages   = @('stockaccount-api', 'stockaccount-ui-vue', 'stockaccount-ui-nuxt')
 $script:AppServices = @('api', 'ui-vue', 'ui-nuxt')
 # Use -cmatch/-ceq: PowerShell -match/-eq are culture-sensitive and fail on "I" under tr-TR.
@@ -11,13 +15,43 @@ $script:VersionPattern = '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 function Write-Deploy([string]$Message, [string]$Color = 'Cyan') { Write-Host "[deploy] $Message" -ForegroundColor $Color }
 
+# Production mode: docker-compose.prod.yml is merged over docker-compose.yml for EVERY compose call (deploy, rollback, backup
+# helpers), ui-nuxt is not part of the release and readiness is checked inside the compose network (no host ports in prod).
+# $Extra = additional compose files for this deploy only (drills).
+function Set-ComposeFiles([switch]$ProductionMode, [string[]]$Extra = @()) {
+    $script:ProdMode = [bool]$ProductionMode
+    $files = @((Join-Path $script:RepoRoot 'docker-compose.yml'))
+    if ($script:ProdMode) { $files += (Join-Path $script:RepoRoot 'docker-compose.prod.yml') }
+    $files += $Extra
+    foreach ($f in $files) { if (-not (Test-Path -LiteralPath $f)) { throw "compose file not found: $f" } }
+    if ($script:ProdMode -or $Extra.Count -gt 0) { $env:COMPOSE_FILE = $files -join [IO.Path]::PathSeparator }
+    else { Remove-Item Env:COMPOSE_FILE -ErrorAction SilentlyContinue }
+    if ($script:ProdMode) {
+        $script:AppImages   = @('stockaccount-api', 'stockaccount-ui-vue')
+        $script:AppServices = @('api', 'ui-vue')
+    }
+}
+
+# Value of a setting: process environment first (compose gives it precedence too), then the repo's .env file. $null when empty.
+function Get-EnvSetting([string]$Name) {
+    $fromEnv = [Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { return $fromEnv }
+    $envFile = Join-Path $script:RepoRoot '.env'
+    if (Test-Path -LiteralPath $envFile) {
+        foreach ($line in [IO.File]::ReadAllLines($envFile)) {
+            if ($line -cmatch ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*?)\s*$') -and -not [string]::IsNullOrWhiteSpace($Matches[1])) { return $Matches[1] }
+        }
+    }
+    return $null
+}
+
 function Get-DockerExe {
     $candidates = @()
     if ($env:DOCKER_EXE) { $candidates += $env:DOCKER_EXE }
     $cmd = Get-Command docker -ErrorAction SilentlyContinue
     if ($cmd) { $candidates += $cmd.Source }
-    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe')
-    $candidates += (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe')
+    if ($env:LOCALAPPDATA) { $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Programs', 'DockerDesktop', 'resources', 'bin', 'docker.exe') }
+    if ($env:ProgramFiles) { $candidates += [IO.Path]::Combine($env:ProgramFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe') }
     foreach ($c in $candidates) { if ($c -and (Test-Path -LiteralPath $c)) { return $c } }
     throw 'docker CLI not found (set DOCKER_EXE or add docker to PATH).'
 }
@@ -51,6 +85,8 @@ function Read-History {
 
 function Save-History($History) {
     if (-not (Test-Path -LiteralPath $script:StateDir)) { New-Item -ItemType Directory -Path $script:StateDir | Out-Null }
+    # Remember the mode so "rollback.ps1" in a fresh shell uses the same compose files without being told.
+    $History | Add-Member -NotePropertyName production -NotePropertyValue $script:ProdMode -Force
     $json = $History | ConvertTo-Json -Depth 6
     [IO.File]::WriteAllText($script:HistoryFile, $json, (New-Object Text.UTF8Encoding($false)))
 }
@@ -80,6 +116,13 @@ function Test-ServiceRunning([string]$Service) {
 }
 
 # Polls the readiness endpoint until 200 and the api container runs the expected image tag.
+# Production has no host ports: ask the api container itself (bash /dev/tcp, the image has no curl) for /health/ready.
+function Get-InternalReadyStatus {
+    $probe = "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3"
+    $out = Invoke-Docker @('compose', 'exec', '-T', 'api', 'bash', '-c', $probe) -AllowFailure -Quiet
+    return (($out -join ' ').Trim())
+}
+
 function Wait-Ready([string]$Version, [string]$HealthUrl, [int]$TimeoutSeconds) {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $expectedImage = "stockaccount-api:$Version"
@@ -88,14 +131,20 @@ function Wait-Ready([string]$Version, [string]$HealthUrl, [int]$TimeoutSeconds) 
         if ($cid) {
             $image = ((Invoke-Docker @('inspect', '--format', '{{.Config.Image}}', $cid) -AllowFailure -Quiet) -join '').Trim()
             if ($image -ceq $expectedImage) {
-                try {
-                    $res = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5
-                    if ($res.StatusCode -eq 200) {
-                        Write-Deploy "ready: $HealthUrl -> 200 $($res.Content)" 'Green'
-                        return $true
-                    }
+                if ($HealthUrl -ceq 'internal') {
+                    $status = Get-InternalReadyStatus
+                    if ($status -cmatch ' 200( |$)') { Write-Deploy "ready: api container /health/ready -> $status" 'Green'; return $true }
                 }
-                catch { }
+                else {
+                    try {
+                        $res = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5
+                        if ($res.StatusCode -eq 200) {
+                            Write-Deploy "ready: $HealthUrl -> 200 $($res.Content)" 'Green'
+                            return $true
+                        }
+                    }
+                    catch { }
+                }
             }
         }
         Start-Sleep -Seconds 3
@@ -148,7 +197,7 @@ function Wait-ServiceHealthy([string]$Service, [int]$TimeoutSeconds = 180) {
 # True when the stateful DB data already exists (container of any state, or the named volume).
 function Test-DatabaseStackExists {
     if ($null -ne (Get-ServiceState 'mssql')) { return $true }
-    $vol = ((Invoke-Docker @('volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=stockaccount', '--filter', 'label=com.docker.compose.volume=mssql-data') -AllowFailure -Quiet) -join '').Trim()
+    $vol = ((Invoke-Docker @('volume', 'ls', '-q', '--filter', "label=com.docker.compose.project=$($script:ComposeProject)", '--filter', 'label=com.docker.compose.volume=mssql-data') -AllowFailure -Quiet) -join '').Trim()
     return [bool]$vol
 }
 
