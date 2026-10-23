@@ -22,6 +22,8 @@ export const useUiStore = defineStore('ui', () => {
   const companyVersion = ref(0)
   /** Bumped after company CRUD so the switcher reloads its options. */
   const companyListVersion = ref(0)
+  /** Company list shared by the top-bar switcher and the in-page notice (loaded by the switcher). */
+  const companies = ref<{ id: number; name: string }[]>([])
   const sidebarOpen = ref(false)
   const dark = ref(readDark())
 
@@ -52,5 +54,5 @@ export const useUiStore = defineStore('ui', () => {
     companyId.value = readCompanyCookie()
   }
 
-  return { companyId, companyVersion, companyListVersion, sidebarOpen, dark, toggleDark, applyTheme, setCompany, syncCompany }
+  return { companies, companyId, companyVersion, companyListVersion, sidebarOpen, dark, toggleDark, applyTheme, setCompany, syncCompany }
 })

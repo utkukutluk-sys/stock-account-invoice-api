@@ -2,7 +2,7 @@ import { computed } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 
-export const COMPANY_REQUIRED_MESSAGE = 'Lütfen önce firma seçiniz.'
+export const COMPANY_REQUIRED_MESSAGE = 'İşlem yapmak için bir firma seçin. Firma seçimi sağ üstteki menüden de yapılabilir.'
 
 /** Admin with "Tüm Firmalar" selected cannot create tenant data (CONTRACT §3.8, §10.4). */
 export function useCompanyGuard() {

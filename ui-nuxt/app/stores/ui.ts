@@ -16,6 +16,8 @@ export const useUiStore = defineStore('ui', () => {
   })
   const companyVersion = ref(0)
   const companyListVersion = ref(0)
+  /** Company list shared by the top-bar switcher and the in-page notice (loaded by the switcher). */
+  const companies = ref<{ id: number; name: string }[]>([])
   const sidebarOpen = ref(false)
   const dark = computed(() => themeCookie.value === 'dark')
 
@@ -33,5 +35,5 @@ export const useUiStore = defineStore('ui', () => {
   /** No-op kept for API parity with ui-vue (the cookie ref is reactive here). */
   function syncCompany() {}
 
-  return { companyId, companyVersion, companyListVersion, sidebarOpen, dark, toggleDark, setCompany, syncCompany }
+  return { companies, companyId, companyVersion, companyListVersion, sidebarOpen, dark, toggleDark, setCompany, syncCompany }
 })
