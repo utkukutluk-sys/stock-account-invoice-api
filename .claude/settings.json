@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./**/node_modules/**)",
+      "Read(./**/dist/**)",
+      "Read(./**/.output/**)",
+      "Read(./**/.nuxt/**)",
+      "Read(./**/bin/**)",
+      "Read(./**/obj/**)",
+      "Read(./.git/**)",
+      "Read(./**/logs/**)",
+      "Read(./**/playwright-report/**)",
+      "Read(./**/test-results/**)",
+      "Read(./**/coverage/**)",
+      "Read(./backups/**)",
+      "Read(./artifacts-sql/**)",
+      "Read(./postman/results/**)",
+      "Read(./**/package-lock.json)"
+    ]
+  }
+}
