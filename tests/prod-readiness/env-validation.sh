@@ -3,8 +3,8 @@
 # and `docker compose config` failing on missing .env values. Usage: bash env-validation.sh [api-image] [nuxt-image]
 set -u
 export PATH="$PATH:/c/Users/PC/AppData/Local/Programs/DockerDesktop/resources/bin"
-API_IMAGE=${1:-stockaccount-api:1.4.0}
-NUXT_IMAGE=${2:-stockaccount-ui-nuxt:1.4.0}
+API_IMAGE=${1:-stockaccount-api:1.5.2}
+NUXT_IMAGE=${2:-stockaccount-ui-nuxt:1.5.2}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SECRET_PW='LeakPw-7f3e9!Zq'          # must never appear in any log line
 SECRET_KEY='LEAKKEY-0123456789-abcdefghijklmnopqrstuvwxyz-XYZ'   # 50 bytes, valid length
@@ -32,9 +32,14 @@ run_case "Jwt:Key too short (value not logged)"   2 "too short"              "${
 run_case "ConnectionStrings:Default empty"        2 "ConnectionStrings:Default is missing" "${P[@]}" -e ConnectionStrings__Default= -e "Jwt__Key=$SECRET_KEY" "$API_IMAGE"
 run_case "runtime login is sa (pw not logged)"    2 "must not use the 'sa'"  "${P[@]}" -e "ConnectionStrings__Default=$SA_CS" -e "Jwt__Key=$SECRET_KEY" "$API_IMAGE"
 run_case "Redis enabled, ConnectionStrings:Redis empty" 2 "ConnectionStrings:Redis is missing" -e ASPNETCORE_ENVIRONMENT=Production -e Cache__UseRedis=true -e ConnectionStrings__Redis= -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" "$API_IMAGE"
-run_case "ForwardedHeaders 0.0.0.0/0"             2 "must not trust every address" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=0.0.0.0/0 "$API_IMAGE"
-run_case "ForwardedHeaders ::/0"                  2 "must not trust every address" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=::/0 "$API_IMAGE"
-run_case "ForwardedHeaders 0.0.0.0/1 + 128.0.0.0/1 (trust-all split)" 2 "must not trust" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=0.0.0.0/1 -e ForwardedHeaders__KnownNetworks__1=128.0.0.0/1 "$API_IMAGE"
+run_case "ForwardedHeaders 0.0.0.0/0"             2 "ForwardedHeaders:KnownNetworks" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=0.0.0.0/0 "$API_IMAGE"
+run_case "ForwardedHeaders ::/0"                  2 "ForwardedHeaders:KnownNetworks" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=::/0 "$API_IMAGE"
+run_case "ForwardedHeaders 0.0.0.0/1 + 128.0.0.0/1 (trust-all split)" 2 "ForwardedHeaders:KnownNetworks" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=0.0.0.0/1 -e ForwardedHeaders__KnownNetworks__1=128.0.0.0/1 "$API_IMAGE"
+run_case "ForwardedHeaders 8.0.0.0/8 (public range)" 2 "ForwardedHeaders" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=8.0.0.0/8 "$API_IMAGE"
+run_case "ForwardedHeaders ::/1 + 8000::/1" 2 "ForwardedHeaders" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=::/1 -e ForwardedHeaders__KnownNetworks__1=8000::/1 "$API_IMAGE"
+run_case "ForwardedHeaders 172.0.0.0/8 (covers public 172.x)" 2 "ForwardedHeaders" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=172.0.0.0/8 "$API_IMAGE"
+run_case "ForwardedHeaders ::ffff:0:0/96 (IPv4-mapped all)" 2 "ForwardedHeaders" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownNetworks__0=::ffff:0:0/96 "$API_IMAGE"
+run_case "KnownProxies public IP 8.8.8.8 (explicit proxy IPs allowed by design → starts)" 124 "" "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e ForwardedHeaders__KnownProxies__0=8.8.8.8 "$API_IMAGE"
 run_case "Cors origin *"                          2 "Cors:AllowedOrigins"    "${P[@]}" -e "ConnectionStrings__Default=$GOOD_CS" -e "Jwt__Key=$SECRET_KEY" -e "Cors__AllowedOrigins__0=*" "$API_IMAGE"
 run_case "several errors reported at once"        2 "Jwt:Key is missing"     "${P[@]}" -e ConnectionStrings__Default= -e Jwt__Key= "$API_IMAGE"
 echo "== ui-nuxt image $NUXT_IMAGE =="

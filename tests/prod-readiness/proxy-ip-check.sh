@@ -24,7 +24,7 @@ container_one() { # url [xff] → status of one login from a container on the co
 }
 wait_window() { echo "  … waiting 65 s for the window to expire"; sleep 65; }
 
-for phase in "ui-vue|http://localhost:5173/api/auth/login|http://ui-vue/api/auth/login" "ui-nuxt|http://localhost:3000/api/auth/login|http://ui-nuxt:3000/api/auth/login"; do
+for phase in "ui-vue|http://127.0.0.1:5173/api/auth/login|http://ui-vue/api/auth/login" "ui-nuxt|http://127.0.0.1:3000/api/auth/login|http://ui-nuxt:3000/api/auth/login"; do
   IFS='|' read -r name hostUrl innerUrl <<<"$phase"
   wait_window
   echo "== $name =="
@@ -37,9 +37,9 @@ done
 
 wait_window
 echo "== API port 5080 directly (no UI proxy) =="
-echo "host burst:                              $(host_burst http://localhost:5080/api/auth/login)"
-echo "host + spoofed XFF 203.0.113.50:          $(host_one http://localhost:5080/api/auth/login 203.0.113.50)   (want 429; 401 = bypass)"
-echo "host + spoofed XFF 203.0.113.51:          $(host_one http://localhost:5080/api/auth/login 203.0.113.51)   (want 429; 401 = bypass)"
+echo "host burst:                              $(host_burst http://127.0.0.1:5080/api/auth/login)"
+echo "host + spoofed XFF 203.0.113.50:          $(host_one http://127.0.0.1:5080/api/auth/login 203.0.113.50)   (want 429; 401 = bypass)"
+echo "host + spoofed XFF 203.0.113.51:          $(host_one http://127.0.0.1:5080/api/auth/login 203.0.113.51)   (want 429; 401 = bypass)"
 echo "spoofed XFF burst ($((LIMIT+1)) × new IP each):"
-codes=(); for i in $(seq 0 "$LIMIT"); do codes+=("$(host_one http://localhost:5080/api/auth/login "198.18.$((i/250)).$((i%250+1))")"); done
+codes=(); for i in $(seq 0 "$LIMIT"); do codes+=("$(host_one http://127.0.0.1:5080/api/auth/login "198.18.$((i/250)).$((i%250+1))")"); done
 echo "  $(printf '%s\n' "${codes[@]}" | sort | uniq -c | tr '\n' ' ')  (all 401 ⇒ unlimited brute force via XFF)"

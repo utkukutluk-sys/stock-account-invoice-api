@@ -2,6 +2,77 @@
 
 Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11, .NET SDK 10.0.402, Node 24.22, SQL Server Express `.\SQLEXPRESS`, Docker 29.9.2, Playwright 1.64.1 (Chromium), newman 6.
 
+## Round 4 — Verification of the round-3 fixes, crash drill, BUG-12 (2026-10-23, git da73350, shared stack)
+
+Scripts (re-runnable): `tests/prod-readiness/proxy-ip-check.sh` (BUG-7, now uses 127.0.0.1), `env-validation.sh` (BUG-11; default images now 1.5.2; the interrupted edit from the previous run was reviewed and kept, plus 4 extra CIDR cases) and the new `round4-checks.sh` (BUG-7 port bindings, BUG-8, BUG-9 with a real backup and restore, BUG-10). The stack was found on **1.4.0 with the old topology** (network 172.18/16, ports on 0.0.0.0). It was moved to **1.5.2** (see BUG-12) and left there, all 5 services healthy, `releases.json current = 1.5.2`, data unchanged (stocks 11, invoices 16, stock-trans 31, users 3).
+
+### R4.1 Fix verification
+
+| Bug | Result | Evidence |
+|---|---|---|
+| BUG-7 (spoofed XFF on :5080) | **Verified** | Direct :5080: 100×401 + 1×429, then spoofed XFF `203.0.113.50` / `.51` → **429**, and 101 requests with 101 new fake IPs → **101×429** (was 101×401). API, SQL and Redis ports are published on loopback only (no `0.0.0.0` / `[::]` binding). Requests to the host LAN address on 5080, 14333 and 6379 are refused (curl exit 7); only 5173/3000 answer on the LAN. ui-vue :5173 and ui-nuxt :3000: host burst 100×401 + 429, spoofed XFF (single and chain) → 429, a container client gets its **own bucket** (401, also with a spoofed XFF). |
+| BUG-8 (`page=2147483647`) | **Verified** | `/api/stocks`, `/invoices`, `/stock-trans`, `/users` → **400** `VALIDATION_FAILED`. Boundary: `page=1000001` → 400, `page=1000000` → 200. |
+| BUG-9 (standalone restore leaves cache) | **Verified** | `backup.ps1 -Label r4stale`; create a stock; second read `X-Cache: HIT`; `restore.ps1 -Target docker -Latest -Label r4stale -Force` → RESTORE OK, CHECKDB clean, "API cache flushed: 5 'sa:*' key(s) removed". Immediate `GET /api/stocks/{id}` → **404** (no `X-Cache: HIT`; the 404 carries no X-Cache header) and the list does not contain it. Run 3 times. |
+| BUG-10 (415 / 405) | **Verified** | `text/plain`, `application/xml`, `application/x-www-form-urlencoded` on `POST /api/stocks` → 415 `application/problem+json`, `code UNSUPPORTED_MEDIA_TYPE`. `/api/auth/refresh` 415 is problem+json. `DELETE /api/auth/login` → 405 problem+json, `code METHOD_NOT_ALLOWED`. |
+| BUG-11 (trust-all CIDR split) | **Verified** (1 new gap, BUG-13) | Production image 1.5.2 exits **2** with one FTL line for `0.0.0.0/1`+`128.0.0.0/1`, `0.0.0.0/0`, `::/0`, `8.0.0.0/8`, `::/1`+`8000::/1`, `172.0.0.0/8`; explicit `KnownProxies=8.8.8.8` still starts (by design). No secret in any log. env-validation: 22/23. |
+
+Not covered by the fix: `ForwardedHeaders__KnownNetworks__0=::ffff:0:0/96` (the whole IPv4-mapped IPv6 space) is **accepted** in Production (the API starts). It is the same class as BUG-11. Filed as **BUG-13 (Low, Backend)**. I did not check whether it is exploitable through the middleware, but the same coverage check should reject it.
+
+### R4.2 Real crash drill (shared stack)
+
+Command: `deploy.ps1 -Version 9.9.9-drill -ComposeOverride scripts/deploy/drills/crash-api.override.yml` (default `-ReadyTimeoutSeconds 240`), from 1.5.2.
+
+| Phase | Time |
+|---|---|
+| pre-deploy backup + build + tag | ~17 s |
+| api restart loop (exit 2), readiness wait until the budget ends | 240 s |
+| automatic rollback to 1.5.2 (stop app, restore from `pre-deploy-9.9.9-drill`: VERIFYONLY, CHECKDB clean, 16 tables / 377 rows = manifest; `sa:*` flushed; up; ready) | **12 s** |
+| **Total, exit 1** | **269 s** (with `-ReadyTimeoutSeconds 60` the total is about 90 s) |
+
+After the drill all 5 services are healthy on `:1.5.2`, `/health/ready` is 200 and the record counts are unchanged. The override is not applied to the rollback.
+
+### R4.3 BUG-12 (release blocker, Backend + DB) — network change: deploy fails, automatic rollback fails
+
+Reproduced on the shared stack. I ran a plain `deploy.ps1 -Version 1.5.2` (no `-RecreateStack`) from the stack that was still on the 1.4.0 topology (the working-tree compose file had the new `default`/`backend` networks and loopback port bindings).
+
+Sequence from the log:
+1. Pre-deploy backup OK, build OK.
+2. `compose up -d --no-build`: compose stops api/ui, creates `stockaccount_backend`, marks **mssql and redis for Recreate** (networks and ports changed) and **stops the old mssql container** (exit 137, renamed to `<hash>_stockaccount-mssql-1`; the replacement stays in state `Created`). Then it tries to remove the old `stockaccount_default` network and fails: `network stockaccount_default has active endpoints (name:"stockaccount-mssql-1")`. Compose exits 1 and leaves the stack half-recreated.
+3. `deploy.ps1` catch → `rollback.ps1 -RestoreDatabase`. `compose stop api ui-vue ui-nuxt` works. `restore.ps1` still gets through VERIFYONLY and the safety backup, because the old mssql container is still shutting down (stop takes about 10 s). The `RESTORE` statement then fails: `OCI runtime exec failed: cannot exec in a stopped container` (exit 128). Result: "AUTOMATIC ROLLBACK FAILED - manual intervention required". The app services stay stopped. The DB data was not touched.
+
+**(a) Why the restore step failed.** The restore is a `docker compose exec mssql sqlcmd`. The `compose up` that failed in step 2 had already stopped and replaced the **mssql** container, so the DB service was down. Nothing in the rollback path checks or restores it:
+- `scripts/deploy/rollback.ps1:176-180` stops only the app services and calls `restore.ps1` straight away. It does not make sure mssql is running and healthy.
+- `scripts/db/restore.ps1:100` (first DB call) and `scripts/db/_common.ps1:148-165` (`Invoke-DbSql`, docker branch) have no running or health precheck and no retry. A stopped container becomes a raw OCI error reported as a generic restore failure.
+- `scripts/deploy/rollback.ps1:190` (`compose up -d --no-build`) would hit the same network error again, because the rollback always uses the new working-tree compose file (`deploy.ps1:107`). The old topology cannot be restored by rolling back images only.
+
+**(b) Does deploy.ps1 detect topology changes?** **No.** It relies on the operator passing `-RecreateStack` (`deploy.ps1:28-30, 84-87`). Without it, `compose up -d` (`deploy.ps1:88`) is the first place that notices, after the stateful containers were already recreated. Two more gaps in the same area:
+- `deploy.ps1:57-59`: if mssql is not running, the script concludes "first deploy" and **skips the backup silently**. A stopped DB (as after this failure) looks like a first deploy. I avoided this by starting mssql by hand before the retry.
+- The automatic rollback has no `-RecreateStack` fallback (`deploy.ps1:107-113`).
+
+**Recommended fix**
+1. `scripts/deploy/deploy.ps1`, before step 1 (before line 53): run `docker compose up -d --no-build --dry-run` and parse the output. I checked that it prints `Network <n> Removing/Creating` and `Container <mssql|redis>-1 Recreate` lines when networks or stateful-service config change, and none of those when nothing changed. If they appear, set `$RecreateStack = $true` (and print why), or abort before the backup unless `-RecreateStack` is given. Also change line 57 to distinguish "no mssql container exists" (first deploy) from "container exists but is not running" (abort). Owner: Backend.
+2. `scripts/deploy/rollback.ps1:176` (and the catch block `deploy.ps1:107-113`): add an "ensure DB is up" step before the restore: `compose up -d mssql redis`; if that fails with "active endpoints", run `compose down --remove-orphans` and `up -d mssql redis`; then wait until mssql is `healthy` (timeout 120 s). Retry `rollback.ps1:190` once after `compose down --remove-orphans` when `up` fails with "active endpoints". Owner: Backend (`scripts/deploy/*`).
+3. `scripts/db/_common.ps1:148` (`Invoke-DbSql`, docker branch) and `scripts/db/restore.ps1:61`: before the first docker call, check `compose ps --status running mssql` and wait for the health check (up to about 60 s). If the container is not running, fail with a clear "mssql is not running" message instead of a raw OCI error. Owner: DB (`scripts/db/*`).
+4. Until fix 1 is in, state in the release notes that topology changes need `-RecreateStack`. Add a drill: deploy a version with a changed network, assert exit 1 and a healthy previous version.
+
+### R4.4 Regression (round 4)
+
+| Suite | Result |
+|---|---|
+| `dotnet test StockAccount.slnx -c Release` | Unit **99/99**, Integration **175/175**, 0 failed, 0 skipped (round 3: 162, so 13 tests were added by the fixes) |
+| `cd postman && npm test` (against the stack on localhost:5080) | **115 requests, 350 assertions, 0 failed** |
+| `env-validation.sh` | 22/23 (the failure is BUG-13) |
+| `round4-checks.sh` | 31/31 |
+| `proxy-ip-check.sh` | all expectations met |
+
+### R4.5 Bug table (round 4)
+
+| ID | Severity | Owner | Title | Status |
+|---|---|---|---|---|
+| BUG-7, 8, 9, 10, 11 | – | – | see R4.1 | **Verified** |
+| BUG-12 | **High (release blocker)** | Backend (`scripts/deploy/*`), DB (`scripts/db/*`) | Topology change: deploy fails with "network has active endpoints", the automatic rollback fails in the restore step | Open (reproduced) |
+| BUG-13 | Low | Backend | `KnownNetworks=::ffff:0:0/96` (all IPv4-mapped addresses) accepted in Production | Open |
+
 ## 0. Round 3 — Production readiness (independent verification, git e0ae9c8, shared stack 1.4.0)
 
 This round re-checks the claims of commits 706a2b7…e0ae9c8 (BACKEND_NOTES §7, DB_NOTES §8/D15, FRONTEND_NOTES "Production readiness") with my own scripts in `tests/prod-readiness/`, not the authors' tests. All of them are re-runnable:
