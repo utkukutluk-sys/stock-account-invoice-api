@@ -46,7 +46,7 @@ jobs:
           --health-retries 10
     env:
       # Per-test throwaway databases are created on this server (database name is replaced per run).
-      TEST_SQL_CONNECTION: "Server=localhost,1433;Database=master;User Id=sa;Password=Ci_Passw0rd!x9;TrustServerCertificate=True;MultipleActiveResultSets=False"
+      TEST_SQL_CONNECTION: "Server=localhost,1433;Database=master;User Id=ci_tests;Password=Ci_Passw0rd!x9;TrustServerCertificate=True;MultipleActiveResultSets=False"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -60,6 +60,12 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
       - run: dotnet restore StockAccount.slnx
       - run: dotnet build StockAccount.slnx -c Release --no-restore
+      # Production-mode tests reject the 'sa' login at runtime, so tests use a dedicated non-sa login.
+      - name: Create non-sa SQL login for tests
+        run: |
+          cid=$(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04")
+          docker exec "$cid" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Ci_Passw0rd!x9' -b \
+            -Q "CREATE LOGIN ci_tests WITH PASSWORD='Ci_Passw0rd!x9', CHECK_POLICY=OFF; ALTER SERVER ROLE sysadmin ADD MEMBER ci_tests;"
       - name: Unit tests
         run: >-
           dotnet test tests/StockAccount.UnitTests -c Release --no-build
