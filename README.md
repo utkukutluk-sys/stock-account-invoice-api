@@ -22,9 +22,11 @@ Bütün sistem Docker Compose ile tek komutla ayağa kalkar (opsiyonel madde).
 ## Hızlı başlangıç (Docker)
 
 ```powershell
-copy .env.example .env
+.\scripts\deploy\new-secrets.ps1     # .env dosyasını güçlü, rastgele şifre ve anahtarlarla oluşturur
 docker compose up --build -d
 ```
+
+`.env` içinde bir değer eksikse `docker compose` başlamaz.
 
 | Servis | Adres |
 |---|---|
@@ -34,7 +36,7 @@ docker compose up --build -d
 | Health | http://localhost:5080/health |
 | SQL Server | `localhost,14333` (kullanıcı `sa`, şifre `.env` içinde) |
 
-API ilk açılışta migration'ları uygular ve örnek verileri yükler.
+İlk açılışta tek seferlik `db-migrate` servisi migration'ları uygular ve örnek verileri yükler. API, SQL Server ve Redis portları yalnızca bu bilgisayardan (127.0.0.1) erişilebilir.
 
 ### Demo kullanıcılar
 
@@ -130,13 +132,50 @@ Ayrıntılı tasarım belgeleri:
 - [docs/BACKEND_NOTES.md](docs/BACKEND_NOTES.md): backend tasarım notları
 - [docs/FRONTEND_NOTES.md](docs/FRONTEND_NOTES.md): frontend tasarım notları
 
+## Canlıya alma ve operasyon
+
+### Production hazırlık kontrol listesi
+
+| Kontrol | Nasıl karşılandı |
+|---|---|
+| Tüm API uçlarında rate limiting | Her uçta kullanıcı başına, giriş yapılmamışsa IP başına limit var. Giriş ve token yenileme uçlarında IP başına daha sıkı limit uygulanır. Limit aşılınca `429` (problem+json, `RATE_LIMITED`, `Retry-After`) döner. Gerçek istemci IP'si yalnızca iki UI proxy'sinden kabul edilir; doğrudan istekte sahte `X-Forwarded-For` işe yaramaz |
+| Açılışta ortam değişkeni doğrulama | Eksik ya da örnek değerli ayarda (JWT anahtarı, bağlantı cümlesi, Redis, `sa` ile runtime bağlantısı, herkese açık bir ağa güven) API açılmaz; tek bir log satırı yazıp exit 2 ile çıkar. Nuxt, `NUXT_API_BASE` olmadan açılmaz |
+| Global error handler, stack trace göstermeme | Tüm hatalar `application/problem+json` formatında döner, buna 404/405/415/500 de dahildir. Production'da stack trace, tip adı ve iç mesaj gösterilmez. Güvenlik header'ları ve HSTS açıktır. Nuxt'ta Türkçe, iç bilgi göstermeyen bir hata sayfası vardır |
+| Bağlantı havuzu ve health check | Havuz ayarları açıkça tanımlıdır (Max/Min Pool, Application Name). Health uçları: `/health/live` (yalnızca süreç) ve `/health/ready` (SQL + Redis; Redis yoksa `Degraded`). Docker healthcheck'leri bu uçlara bağlıdır. API, yetkisi kısıtlı `stockaccount_app` kullanıcısıyla çalışır |
+| Tek komutla geri dönüş, Docker ve yedekleme | Sürümlü imajlar, dağıtım öncesi otomatik yedek, sağlık kontrolü başarısız olursa otomatik geri dönüş ve tek komutluk `rollback.ps1` (aşağıda) |
+
+### Dağıtım ve geri dönüş
+
+```powershell
+.\scripts\deploy\deploy.ps1 -Version 1.6.0           # önce yedek alır, sonra derler ve dağıtır; sağlıksızsa kendiliğinden geri döner
+.\scripts\deploy\rollback.ps1                        # bir önceki sürüme döner
+.\scripts\deploy\rollback.ps1 -RestoreDatabase       # ...ve veritabanını dağıtım öncesi yedekten geri yükler
+```
+
+- Docker ağ yapısı değişen sürümler kendiliğinden algılanır ve ortam volume'lar korunarak yeniden kurulur.
+- Şema geri dönüşü EF down-migration ile değil, dağıtım öncesi yedeğin geri yüklenmesiyle yapılır.
+
+### Yedekleme
+
+```powershell
+.\scripts\db\backup.ps1 -Target docker -Label manual          # checksum'lı yedek + manifest + RESTORE VERIFYONLY
+.\scripts\db\restore.ps1 -Target docker -Latest -Force        # geri yükler, CHECKDB yapar, Redis cache'ini temizler
+.\scripts\db\register-backup-task.ps1 -Target docker -At 02:00 -RetentionCount 14   # günlük zamanlanmış yedek
+```
+
+Yedekler `./backups` klasöründe tutulur. Ayrıntılar:
+
+- [docs/BACKEND_NOTES.md](docs/BACKEND_NOTES.md) §7
+- [docs/DB_NOTES.md](docs/DB_NOTES.md) §8
+
 ## Testler
 
 | Test seti | Komut | Sonuç |
 |---|---|---|
-| Birim (.NET) | `dotnet test tests/StockAccount.UnitTests` | 94 / 94 |
-| Entegrasyon (.NET) | `dotnet test tests/StockAccount.IntegrationTests` | 153 / 153 |
-| Birim (ui-vue / ui-nuxt) | `npm test` | 74 / 74 ve 57 / 57 |
+| Birim (.NET) | `dotnet test tests/StockAccount.UnitTests` | 99 / 99 |
+| Entegrasyon (.NET) | `dotnet test tests/StockAccount.IntegrationTests` | 179 / 179 |
+| Birim (ui-vue / ui-nuxt) | `npm test` | 85 / 85 ve 73 / 73 |
+| Production hazırlık senaryoları | `tests/prod-readiness/*.sh` | Rate limit, ayar doğrulama, hata sızıntısı, health, geri dönüş tatbikatları |
 | Postman (newman) | `cd postman; npm test` | 115 istek, 350 doğrulama, 0 hata |
 | E2E (Playwright: Vue, Nuxt ve ikisinin mobil görünümü) | `cd e2e; npm run test:vue` / `npm run test:nuxt` | 56 geçti, 2 atlandı (yalnız Nuxt'a ait testler), 0 hata |
 
