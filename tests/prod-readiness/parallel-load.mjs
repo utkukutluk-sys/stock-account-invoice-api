@@ -1,12 +1,16 @@
 // Fires N parallel authenticated DB-bound requests (half admin, half operator) and reports status codes and latency.
 //   node parallel-load.mjs http://localhost:5080 300
-const [base = 'http://localhost:5080', n = '300'] = process.argv.slice(2);
+import { resolveTarget, STAGING_URL, stagingAdmin } from './_guard.mjs';
+// Default target: STAGING (bootstrap admin plays both users). The dev stack needs --i-know-this-is-dev.
+const { args, staging } = resolveTarget(process.argv.slice(2));
+const sa = staging ? stagingAdmin() : {};
+const [base = STAGING_URL, n = '300'] = args;
 async function login(email, password) {
   const r = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
   if (r.status !== 200) throw new Error(`login ${email} → ${r.status}`);
   return (await r.json()).accessToken;
 }
-const tokens = [await login('admin@stockaccount.local', 'Admin123!'), await login('demo@stockaccount.local', 'Demo123!')];
+const tokens = [await login(sa.email ?? 'admin@stockaccount.local', sa.password ?? 'Admin123!'), await login(sa.email ?? 'demo@stockaccount.local', sa.password ?? 'Demo123!')];
 const urls = ['/api/dashboard/summary', '/api/invoices?pageSize=100', '/api/stock-trans?pageSize=100', '/api/act-trans?pageSize=100'];
 const t0 = Date.now();
 const results = await Promise.all(Array.from({ length: Number(n) }, async (_, i) => {

@@ -10,6 +10,8 @@
 Set-StrictMode -Version 3.0
 
 $script:RepoRoot           = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
+# dev | staging | prod: own compose project, env file and backup directory (scripts/_environments.ps1).
+. (Join-Path (Join-Path $PSScriptRoot '..') '_environments.ps1')
 $script:DbNamePattern      = '^[A-Za-z_][A-Za-z0-9_]{0,127}$'
 $script:LabelPattern       = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 $script:BackupFilePattern  = '^[A-Za-z0-9_][A-Za-z0-9._-]{0,200}\.bak$'
@@ -41,11 +43,12 @@ function Get-DockerExe {
     throw 'docker CLI not found (set DOCKER_EXE or add docker to PATH).'
 }
 
-# Reads one KEY=value from the process environment, else from .env. Returns $null when absent/empty. Never logs it.
+# Reads one KEY=value from the process environment, else from the active environment's env file (.env, or .env.staging for
+# staging). Returns $null when absent/empty. Never logs it.
 function Get-DotEnvValue([string]$Name) {
     $fromEnv = [Environment]::GetEnvironmentVariable($Name)
     if ($fromEnv) { return $fromEnv }
-    $envFile = Join-Path $script:RepoRoot '.env'
+    $envFile = Get-ActiveEnvFilePath
     if (-not (Test-Path -LiteralPath $envFile)) { return $null }
     foreach ($line in [IO.File]::ReadAllLines($envFile)) {
         if ($line -cmatch ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*)$')) {
@@ -112,11 +115,14 @@ function New-DbContext {
     }
     else {
         Assert-Pattern $Service $script:ServicePattern 'compose service'
-        if (-not $ComposeFile) { $ComposeFile = Join-Path $script:RepoRoot 'docker-compose.yml' }
-        if (-not (Test-Path -LiteralPath $ComposeFile)) { throw "Compose file not found: $ComposeFile" }
+        # Explicit -ComposeFile wins; otherwise the compose files of the active environment (dev: docker-compose.yml only;
+        # staging/prod: + prod override). The compose project comes from COMPOSE_PROJECT_NAME (set by Use-StockEnvironment).
+        $composeFiles = if ($ComposeFile) { @($ComposeFile) } else { @(Get-EnvironmentComposeFilePaths (Get-ActiveEnvironmentName)) }
+        foreach ($cf in $composeFiles) { if (-not (Test-Path -LiteralPath $cf)) { throw "Compose file not found: $cf" } }
         $ctx.Runner = 'docker'
         $ctx.Docker = Get-DockerExe
-        $ctx.ComposeArgs = @('compose', '--project-directory', $script:RepoRoot, '-f', (Resolve-Path -LiteralPath $ComposeFile).Path)
+        $ctx.ComposeArgs = @('compose', '--project-directory', $script:RepoRoot)
+        foreach ($cf in $composeFiles) { $ctx.ComposeArgs += @('-f', (Resolve-Path -LiteralPath $cf).Path) }
         $ctx.Service = $Service
     }
     return [pscustomobject]$ctx
@@ -307,10 +313,11 @@ function Get-DbState($Ctx) {
 function Get-BackupLocation {
     param([Parameter(Mandatory)]$Ctx, [string]$BackupDir, [switch]$ForWrite)
 
-    if (-not $BackupDir) {
-        $BackupDir = if ($Ctx.Target -eq 'local') { Join-Path $script:RepoRoot 'backups\local' } else { Join-Path $script:RepoRoot 'backups' }
-    }
+    $envName = Get-ActiveEnvironmentName
+    if (-not $BackupDir) { $BackupDir = Get-EnvironmentBackupDir $envName $Ctx.Target }
     Assert-Pattern $BackupDir $script:SafePathPattern 'backup directory'
+    # Isolation guard: an environment only reads/writes/prunes inside its own backup directory (checked before anything is created).
+    Assert-BackupDirIsolated $envName $BackupDir
     if (-not (Test-Path -LiteralPath $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null }
     $BackupDir = (Resolve-Path -LiteralPath $BackupDir).Path
 
@@ -392,6 +399,30 @@ function Get-BackupFiles([string]$HostDir, [string]$Database, [string]$Target) {
                 [pscustomobject]@{ File = $_; Stamp = $mm.Groups[1].Value; Label = $mm.Groups[2].Value; Family = (Get-LabelFamily $mm.Groups[2].Value) }
             }
         } | Sort-Object Stamp -Descending)
+}
+
+# Retention: keeps the newest $Keep backups of label family $Family INSIDE $HostDir and deletes the rest (+ manifests).
+# Never leaves the environment's backup directory: the directory is re-checked by the isolation guard and every file to delete
+# must be a direct child of it. Returns the removed file names.
+function Invoke-BackupRetention {
+    param([Parameter(Mandatory)][string]$HostDir, [Parameter(Mandatory)][string]$Database, [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$Family, [Parameter(Mandatory)][int]$Keep, [string]$Environment)
+    if ($Keep -le 0) { return @() }
+    if (-not $Environment) { $Environment = Get-ActiveEnvironmentName }
+    Assert-BackupDirIsolated $Environment $HostDir
+    $dirFull = [IO.Path]::GetFullPath($HostDir).TrimEnd('\', '/')
+    $removed = @()
+    $old = @(Get-BackupFiles -HostDir $HostDir -Database $Database -Target $Target | Where-Object { $_.Family -eq $Family } | Select-Object -Skip $Keep)
+    foreach ($o in $old) {
+        $parent = [IO.Path]::GetFullPath($o.File.DirectoryName).TrimEnd('\', '/')
+        if (-not $parent.Equals($dirFull, [StringComparison]::OrdinalIgnoreCase)) { throw "Backup isolation guard: refusing to delete $($o.File.FullName) (outside $dirFull)." }
+        Remove-Item -LiteralPath $o.File.FullName -Force
+        $j = Get-ManifestPath $o.File.FullName
+        if (Test-Path -LiteralPath $j) { Remove-Item -LiteralPath $j -Force }
+        Write-Step "Retention ($Family, keep $Keep): removed $($o.File.Name)"
+        $removed += $o.File.Name
+    }
+    return $removed
 }
 
 function Test-Interactive {
@@ -539,7 +570,7 @@ function Get-OffsiteConfig {
         RetentionDays = (Get-DotEnvValue 'OFFSITE_RETENTION_DAYS')
         MinKeep       = (Get-DotEnvValue 'OFFSITE_MIN_KEEP')
     }
-    if ($null -eq $c.Prefix) { $c.Prefix = 'stockaccount' }
+    if ($null -eq $c.Prefix) { $c.Prefix = if ((Get-ActiveEnvironmentName) -ceq 'staging') { 'stockaccount-staging' } else { 'stockaccount' } }
     if (-not $c.RetentionDays) { $c.RetentionDays = '30' }
     if (-not $c.MinKeep) { $c.MinKeep = '3' }
     $missing = @('Bucket', 'AccessKey', 'SecretKey' | Where-Object { -not $c[$_] })

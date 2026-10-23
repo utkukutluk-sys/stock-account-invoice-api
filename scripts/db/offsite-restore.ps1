@@ -41,7 +41,8 @@ try {
     try { $cfg = Get-OffsiteConfig }
     catch { Write-Host "[offsite] $($_.Exception.Message)" -ForegroundColor Red; $exitCode = 2; throw [OperationCanceledException]::new() }
 
-    $dir = if ($BackupDir) { $BackupDir } elseif ($Target -eq 'local') { Join-Path (Join-Path $script:RepoRoot 'backups') 'local' } else { Join-Path $script:RepoRoot 'backups' }
+    $dir = if ($BackupDir) { $BackupDir } else { Get-EnvironmentBackupDir (Get-ActiveEnvironmentName) $Target }
+    Assert-BackupDirIsolated (Get-ActiveEnvironmentName) $dir
     Assert-Pattern $dir $script:SafePathPattern 'backup directory'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
 

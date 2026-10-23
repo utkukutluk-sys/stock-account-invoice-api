@@ -13,6 +13,9 @@
   File name : <db>_<target>_<yyyyMMdd-HHmmss>Z_<label>.bak (+ .json manifest next to it).
   Options   : COPY_ONLY by default (ad-hoc backups never disturb a differential/log chain; use -ChainBase for a
               regular full backup), CHECKSUM always, COMPRESSION when the edition supports it (not on Express).
+  Environments: -Environment dev|staging|prod (default $env:STOCKACCOUNT_ENV, else dev). dev writes to <repo>\backups (unchanged),
+              staging to <repo>\backups\staging, prod to BACKUP_DIR or <repo>\backups\prod. Backup, restore and retention only
+              operate inside that directory (guarded): a staging/prod retention can never delete dev files.
   Retention : keeps the newest -RetentionCount backups per label family ("pre-deploy-1.2.0" -> "pre-deploy");
               0 disables pruning.
   Exit code : 0 success, 1 any failure. The manifest object is written to the pipeline on success.
@@ -35,11 +38,14 @@ param(
     [switch]$ChainBase,
     [switch]$Offsite,
     [switch]$SkipOffsite,
-    [string]$LogFile
+    [string]$LogFile,
+    # dev (default, files in ./backups) | staging (./backups/staging) | prod (BACKUP_DIR or ./backups/prod). Defaults to $env:STOCKACCOUNT_ENV.
+    [ValidateSet('dev', 'staging', 'prod')][string]$Environment
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_common.ps1')
+if ($Environment) { $null = Use-StockEnvironment $Environment }
 
 $transcript = $false
 try {
@@ -132,14 +138,8 @@ ORDER BY b.backup_set_id DESC;
     Write-Step ("OK {0} ({1:N1} MB, sha256 {2}..., migration head {3})" -f $fileName, ($item.Length / 1MB), $sha.Substring(0, 12), $state.MigrationHead)
 
     if ($RetentionCount -gt 0) {
-        $family = Get-LabelFamily $Label
-        $old = @(Get-BackupFiles -HostDir $loc.HostDir -Database $Database -Target $Target | Where-Object { $_.Family -eq $family } | Select-Object -Skip $RetentionCount)
-        foreach ($o in $old) {
-            Remove-Item -LiteralPath $o.File.FullName -Force
-            $j = Get-ManifestPath $o.File.FullName
-            if (Test-Path -LiteralPath $j) { Remove-Item -LiteralPath $j -Force }
-            Write-Step "Retention ($family, keep $RetentionCount): removed $($o.File.Name)"
-        }
+        # Only inside this environment's own backup directory (guarded in Invoke-BackupRetention).
+        $null = Invoke-BackupRetention -HostDir $loc.HostDir -Database $Database -Target $Target -Family (Get-LabelFamily $Label) -Keep $RetentionCount
     }
 
 

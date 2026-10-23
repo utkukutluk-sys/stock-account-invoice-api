@@ -3,11 +3,17 @@
 Set-StrictMode -Version 3.0
 
 $script:RepoRoot    = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
-# DEPLOY_STATE_DIR / COMPOSE_PROJECT_NAME let a second stack (e.g. a local production test) keep its own release history.
-$script:StateDir    = if ($env:DEPLOY_STATE_DIR) { $env:DEPLOY_STATE_DIR } else { Join-Path $PSScriptRoot '.state' }
+# dev | staging | prod: compose project, env file, release history and backup folder per environment (scripts/_environments.ps1).
+. (Join-Path (Join-Path $PSScriptRoot '..') '_environments.ps1')
+# Defaults = dev (historic behaviour); Initialize-DeployEnvironment switches them. DEPLOY_STATE_DIR still overrides the state folder
+# (a second stack keeps its own history); COMPOSE_PROJECT_NAME still names a second dev-style stack.
+$script:EnvDef = Get-EnvironmentDefinition 'dev'
+$script:BaseStateDir = Join-Path $PSScriptRoot '.state'
+$script:StateDir    = if ($env:DEPLOY_STATE_DIR) { $env:DEPLOY_STATE_DIR } else { $script:BaseStateDir }
 $script:HistoryFile = Join-Path $script:StateDir 'releases.json'
 $script:ComposeProject = if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { 'stockaccount' }
 $script:ProdMode  = $false
+
 $script:AppImages   = @('stockaccount-api', 'stockaccount-ui-vue', 'stockaccount-ui-nuxt')
 $script:AppServices = @('api', 'ui-vue', 'ui-nuxt')
 # Use -cmatch/-ceq: PowerShell -match/-eq are culture-sensitive and fail on "I" under tr-TR.
@@ -15,16 +21,31 @@ $script:VersionPattern = '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 function Write-Deploy([string]$Message, [string]$Color = 'Cyan') { Write-Host "[deploy] $Message" -ForegroundColor $Color }
 
-# Production mode: docker-compose.prod.yml is merged over docker-compose.yml for EVERY compose call (deploy, rollback, backup
-# helpers), ui-nuxt is not part of the release and readiness is checked inside the compose network (no host ports in prod).
-# $Extra = additional compose files for this deploy only (drills).
-function Set-ComposeFiles([switch]$ProductionMode, [string[]]$Extra = @()) {
-    $script:ProdMode = [bool]$ProductionMode
-    $files = @((Join-Path $script:RepoRoot 'docker-compose.yml'))
-    if ($script:ProdMode) { $files += (Join-Path $script:RepoRoot 'docker-compose.prod.yml') }
-    $files += $Extra
+# Switches this process to one environment (dev | staging | prod): compose project, env file (COMPOSE_ENV_FILES), release history
+# folder. Call it first in deploy.ps1 / rollback.ps1, then Set-ComposeFiles.
+function Initialize-DeployEnvironment([string]$Name) {
+    $previous = Get-ActiveEnvironmentName
+    if ($previous -cne 'dev' -and $env:COMPOSE_PROJECT_NAME -and $env:COMPOSE_PROJECT_NAME -ceq (Get-EnvironmentDefinition $previous).Project) {
+        Remove-Item Env:COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue   # left over from an earlier staging/prod run in this shell
+    }
+    $def = Use-StockEnvironment $Name
+    $script:EnvDef = $def
+    $script:StateDir = if ($env:DEPLOY_STATE_DIR) { $env:DEPLOY_STATE_DIR }
+                       elseif ($def.StateSubDir) { Join-Path $script:BaseStateDir $def.StateSubDir }
+                       else { $script:BaseStateDir }
+    $script:HistoryFile = Join-Path $script:StateDir 'releases.json'
+    $script:ComposeProject = if ($def.Name -ceq 'dev') { $(if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { 'stockaccount' }) } else { $def.Project }
+    return $def
+}
+
+# Compose files of the active environment (+ $Extra = drill overrides for THIS deploy only) are merged for EVERY compose call
+# (deploy, rollback, backup helpers). staging/prod: docker-compose.prod.yml on top, ui-nuxt is not part of the release and
+# readiness is checked inside the compose network (no api host port).
+function Set-ComposeFiles([string[]]$Extra = @()) {
+    $script:ProdMode = [bool]$script:EnvDef.Production
+    $files = @(Get-EnvironmentComposeFilePaths $script:EnvDef.Name) + @($Extra)
     foreach ($f in $files) { if (-not (Test-Path -LiteralPath $f)) { throw "compose file not found: $f" } }
-    if ($script:ProdMode -or $Extra.Count -gt 0) { $env:COMPOSE_FILE = $files -join [IO.Path]::PathSeparator }
+    if ($files.Count -gt 1) { $env:COMPOSE_FILE = $files -join [IO.Path]::PathSeparator }
     else { Remove-Item Env:COMPOSE_FILE -ErrorAction SilentlyContinue }
     if ($script:ProdMode) {
         $script:AppImages   = @('stockaccount-api', 'stockaccount-ui-vue')
@@ -32,18 +53,14 @@ function Set-ComposeFiles([switch]$ProductionMode, [string[]]$Extra = @()) {
     }
 }
 
-# Value of a setting: process environment first (compose gives it precedence too), then the repo's .env file. $null when empty.
+# Value of a setting: process environment first (compose gives it precedence too), then the active environment's env file
+# (.env, or .env.staging for staging). $null when empty.
 function Get-EnvSetting([string]$Name) {
     $fromEnv = [Environment]::GetEnvironmentVariable($Name)
     if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { return $fromEnv }
-    $envFile = Join-Path $script:RepoRoot '.env'
-    if (Test-Path -LiteralPath $envFile) {
-        foreach ($line in [IO.File]::ReadAllLines($envFile)) {
-            if ($line -cmatch ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*?)\s*$') -and -not [string]::IsNullOrWhiteSpace($Matches[1])) { return $Matches[1] }
-        }
-    }
-    return $null
+    return (Read-EnvFileValue (Get-ActiveEnvFilePath) $Name)
 }
+
 
 function Get-DockerExe {
     $candidates = @()
@@ -85,8 +102,9 @@ function Read-History {
 
 function Save-History($History) {
     if (-not (Test-Path -LiteralPath $script:StateDir)) { New-Item -ItemType Directory -Path $script:StateDir | Out-Null }
-    # Remember the mode so "rollback.ps1" in a fresh shell uses the same compose files without being told.
+    # Remember the environment (state folders are per environment anyway) for diagnostics.
     $History | Add-Member -NotePropertyName production -NotePropertyValue $script:ProdMode -Force
+    $History | Add-Member -NotePropertyName environment -NotePropertyValue $script:EnvDef.Name -Force
     $json = $History | ConvertTo-Json -Depth 6
     [IO.File]::WriteAllText($script:HistoryFile, $json, (New-Object Text.UTF8Encoding($false)))
 }
@@ -248,4 +266,17 @@ function Invoke-ComposeUpWithRetry {
     Write-Deploy 'network has active endpoints: one compose down --remove-orphans (volumes kept), then up again' 'Yellow'
     Invoke-Docker @('compose', 'down', '--remove-orphans') | Out-Null
     Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
+}
+
+# staging/prod share the local image names (stockaccount-api:<version> ...) with the dev stack. Never (re)build or retag a version
+# tag that a container of the dev project (default compose project "stockaccount") is running from.
+function Assert-VersionNotUsedByDev([string]$Version) {
+    if ($script:EnvDef.Name -ceq 'dev') { return }
+    $out = Invoke-Docker @('ps', '-a', '--filter', 'label=com.docker.compose.project=stockaccount', '--format', '{{.Names}}|{{.Image}}') -AllowFailure -Quiet
+    foreach ($line in $out) {
+        $parts = "$line".Split('|')
+        if ($parts.Count -ge 2 -and $parts[1] -cmatch ('^stockaccount-[a-z-]+:' + [regex]::Escape($Version) + '$')) {
+            throw "Version $Version is the image tag of the running dev stack ($($parts[0]) uses $($parts[1])): choose another version for $($script:EnvDef.Name) so the dev images are never rebuilt."
+        }
+    }
 }

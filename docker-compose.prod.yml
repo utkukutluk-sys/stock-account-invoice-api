@@ -1,6 +1,6 @@
 # Production override for a single Linux VPS. Use it ON TOP of docker-compose.yml:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-# (scripts/deploy/deploy.ps1 -Production does this for you). Full guide: docs/DEPLOYMENT.md.
+# (scripts/deploy/deploy.ps1 -Environment prod does this for you; -Production is an alias). Full guide: docs/DEPLOYMENT.md.
 #
 # What changes compared to the dev/demo stack:
 #   - ASPNETCORE_ENVIRONMENT=Production (strict config validation, no placeholder secrets), no demo seed, Swagger off,
@@ -10,6 +10,9 @@
 #   - Uptime Kuma listens on 127.0.0.1:3001 only (reach it with an SSH tunnel).
 # Client IP chain: client -> caddy (172.30.0.20) -> ui-vue nginx (172.30.0.10, real_ip from caddy only) -> api (trusts
 # only 172.30.0.10). NET_PREFIX (default 172.30.0) exists only so a second copy can run next to another stack.
+
+# Compose project of the production stack (own containers, network and volumes; never the dev project "stockaccount").
+name: stockaccount-prod
 
 x-logging: &default-logging
   driver: json-file
@@ -27,8 +30,8 @@ services:
       MSSQL_PID: ${MSSQL_PID:-Express}
     volumes:
       - mssql-data:/var/opt/mssql
-      # Backups written by scripts/db/backup.ps1 -Target docker. BACKUP_DIR must be writable by uid 10001 (docs/DEPLOYMENT.md).
-      - ${BACKUP_DIR:-./backups}:/var/opt/mssql/backup
+      # Backups written by scripts/db/backup.ps1 -Target docker. Prod has its OWN folder (./backups/prod) so it never shares files with a dev stack; BACKUP_DIR must be writable by uid 10001 (docs/DEPLOYMENT.md).
+      - ${BACKUP_DIR:-./backups/prod}:/var/opt/mssql/backup
 
   redis:
     ports: !reset []

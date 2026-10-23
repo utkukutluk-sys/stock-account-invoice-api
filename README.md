@@ -136,6 +136,8 @@ Ayrıntılı tasarım belgeleri:
 
 ## Canlıya alma ve operasyon
 
+**Staging ortamı:** dev yığınının yanında, onunla hiçbir kaynak paylaşmayan kalıcı bir staging yığını çalışır (Production modu, Caddy + HTTPS, `https://localhost:8443`; ayrı compose projesi, ağ, volume, `.env.staging` ve `backups/staging`). Kurulum: `.\scripts\deploy\new-secrets.ps1 -Environment staging`, dağıtım: `.\scripts\deploy\deploy.ps1 -Environment staging -Version x.y.z`, geri dönüş: `rollback.ps1 -Environment staging -RestoreDatabase`. Sürüm akışı dev -> staging (deploy + smoke) -> prod; ayrıntılar [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) "Ortamlar" bölümünde.
+
 ### Production hazırlık kontrol listesi
 
 | Kontrol | Nasıl karşılandı |
@@ -175,9 +177,9 @@ Yedekler `./backups` klasöründe tutulur. Ayrıntılar:
 | Test seti | Komut | Sonuç |
 |---|---|---|
 | Birim (.NET) | `dotnet test tests/StockAccount.UnitTests` | 99 / 99 |
-| Entegrasyon (.NET) | `dotnet test tests/StockAccount.IntegrationTests` | 179 / 179 |
+| Entegrasyon (.NET) | `dotnet test tests/StockAccount.IntegrationTests` | 184 / 184 |
 | Birim (ui-vue / ui-nuxt) | `npm test` | 85 / 85 ve 73 / 73 |
-| Production hazırlık senaryoları | `tests/prod-readiness/*.sh` | Rate limit, ayar doğrulama, hata sızıntısı, health, geri dönüş tatbikatları |
+| Production hazırlık senaryoları (varsayılan hedef: staging; dev yığını yalnızca `--i-know-this-is-dev` ile) | `tests/prod-readiness/*.sh`, `*.mjs`, `pwsh tests/prod-readiness/backup-isolation.test.ps1` | Rate limit, ayar doğrulama, hata sızıntısı, health, geri dönüş tatbikatları |
 | Postman (newman) | `cd postman; npm test` | 115 istek, 350 doğrulama, 0 hata |
 | E2E (Playwright: Vue, Nuxt ve ikisinin mobil görünümü) | `cd e2e; npm run test:vue` / `npm run test:nuxt` | 56 geçti, 2 atlandı (yalnız Nuxt'a ait testler), 0 hata |
 

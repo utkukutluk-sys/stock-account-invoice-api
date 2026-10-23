@@ -1,8 +1,13 @@
 // Round 3 item 3: error-handling fuzz against an API running in Production mode.
 // Every response (status line, headers, body) is scanned for information leaks: stack traces, exception type names,
 // file paths, SQL text, framework/server versions.
+//   node fuzz-errors.mjs [https://localhost:8443 [opEmail opPw adminEmail adminPw]]   (default: staging)
 //   node fuzz-errors.mjs http://localhost:5090 demo@stockaccount.local Demo123! admin@stockaccount.local Admin123!
-const [base = 'http://localhost:5090', opEmail = 'demo@stockaccount.local', opPw = 'Demo123!', adEmail = 'admin@stockaccount.local', adPw = 'Admin123!'] = process.argv.slice(2);
+import { resolveTarget, STAGING_URL, stagingAdmin } from './_guard.mjs';
+// Default target: STAGING (the bootstrap admin of .env.staging plays both roles). The dev stack needs --i-know-this-is-dev.
+const { args, staging } = resolveTarget(process.argv.slice(2));
+const sa = staging ? stagingAdmin() : {};
+const [base = STAGING_URL, opEmail = sa.email ?? 'demo@stockaccount.local', opPw = sa.password ?? 'Demo123!', adEmail = sa.email ?? 'admin@stockaccount.local', adPw = sa.password ?? 'Admin123!'] = args;
 
 const LEAK_PATTERNS = [
   [/\bat [A-Z][\w.]+\.[\w<>]+\(/, 'stack frame'],

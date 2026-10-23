@@ -5,7 +5,11 @@
 //   node rate-limit-coverage.mjs http://localhost:5091 5 2 3
 // The API is reached from loopback, which is a trusted proxy by default, so X-Forwarded-For selects the client IP
 // (used to give anonymous calls separate IP buckets).
-const [base = 'http://localhost:5091', globalLimit = '5', authLimit = '2', windowSec = '3'] = process.argv.slice(2);
+import { resolveTarget } from './_guard.mjs';
+// Needs Swagger + the demo seed, i.e. a throw-away Development API on its own port (5091, see above): it can NOT run against staging (Production,
+// no Swagger) and is refused on the dev stack ports 5080/5173/3000 unless --i-know-this-is-dev is given. Staging rate limits: proxy-ip-check.sh.
+const { args } = resolveTarget(process.argv.slice(2), [0], false);
+const [base = 'http://localhost:5091', globalLimit = '5', authLimit = '2', windowSec = '3'] = args;
 const G = Number(globalLimit), A = Number(authLimit), W = Number(windowSec) * 1000 + 700;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let ipSeq = 1;

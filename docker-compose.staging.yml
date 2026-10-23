@@ -1,0 +1,57 @@
+# STAGING override: a production-like stack that lives permanently next to the dev stack on the same machine.
+# Order: docker-compose.yml + docker-compose.prod.yml + this file (scripts/deploy/deploy.ps1 -Environment staging does it all):
+#   ./scripts/deploy/new-secrets.ps1 -Environment staging        # writes .env.staging (git-ignored)
+#   ./scripts/deploy/deploy.ps1 -Environment staging -Version 1.6.0
+#   docker compose -p stockaccount-staging --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps
+#
+# Isolation from the dev stack (project "stockaccount") and from any other copy:
+#   - compose project  stockaccount-staging (own containers, own volumes stockaccount-staging_*, own networks)
+#   - env file         .env.staging (own secrets, DOMAIN=localhost, LOCAL_TLS=internal = Caddy's local CA)
+#   - network          172.30.40.0/24 (dev uses 172.30.0.0/24); fixed IPs ui-vue .10, caddy .20
+#   - host ports       ONLY Caddy 8080 (http) / 8443 (https) and Uptime Kuma 127.0.0.1:3002. Nothing else is published
+#                      (api, mssql, redis, ui-vue have no host ports through docker-compose.prod.yml).
+#   - backups          ./backups/staging (scripts/db/* only ever read/write/prune inside it)
+#   - release history  scripts/deploy/.state/staging/releases.json
+# URL: https://localhost:8443  (self-signed local CA: accept the browser warning, or curl -k)
+name: stockaccount-staging
+
+services:
+  mssql:
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ${BACKUP_DIR:-./backups/staging}:/var/opt/mssql/backup
+
+  api:
+    environment:
+      # The staging ui-vue is the only proxy the API believes (index 1 is ui-nuxt, which does not run).
+      ForwardedHeaders__KnownProxies__0: 172.30.40.10
+      ForwardedHeaders__KnownProxies__1: 172.30.40.10
+
+  ui-vue:
+    environment:
+      TRUSTED_PROXY_IP: 172.30.40.20
+    networks:
+      default:
+        ipv4_address: 172.30.40.10
+
+  caddy:
+    # Bound to loopback by default (STAGING_BIND=0.0.0.0 in .env.staging to share it on the LAN).
+    ports: !override
+      - "${STAGING_BIND:-127.0.0.1}:8080:80"
+      - "${STAGING_BIND:-127.0.0.1}:8443:443"
+      - "${STAGING_BIND:-127.0.0.1}:8443:443/udp"   # HTTP/3
+    networks:
+      default:
+        ipv4_address: 172.30.40.20
+
+  uptime-kuma:
+    ports: !override
+      - "127.0.0.1:3002:3001"
+
+networks:
+  default:
+    ipam:
+      config: !override
+        - subnet: 172.30.40.0/24
+          gateway: 172.30.40.1
+          ip_range: 172.30.40.128/25   # dynamic addresses; .10 ui-vue, .20 caddy are fixed

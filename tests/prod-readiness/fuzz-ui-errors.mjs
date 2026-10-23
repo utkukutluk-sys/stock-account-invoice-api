@@ -1,6 +1,10 @@
 // Round 3 item 3 (UIs): error pages of ui-vue (nginx) and ui-nuxt (Nitro SSR) must not leak stack traces, paths or versions.
 //   node fuzz-ui-errors.mjs http://localhost:5173 http://localhost:3000
-const [vue = 'http://localhost:5173', nuxt = 'http://localhost:3000'] = process.argv.slice(2);
+import { resolveTarget, STAGING_URL, stagingAdmin } from './_guard.mjs';
+// Default target: STAGING (only the Vue UI behind Caddy runs there; ui-nuxt is skipped). The dev stack needs --i-know-this-is-dev.
+const { args, staging } = resolveTarget(process.argv.slice(2), [0, 1]);
+const sa = staging ? stagingAdmin() : {};
+const [vue = STAGING_URL, nuxt = staging ? '' : 'http://localhost:3000'] = args;
 const LEAKS = [
   [/\bat [\w$.<>]+ \(|\n\s+at /, 'stack frame'],
   [/[A-Z]\w*(Exception|Error):/, 'error type with message'],
@@ -12,7 +16,7 @@ const LEAKS = [
 const BAD_HEADERS = ['x-powered-by', 'x-aspnet-version', 'x-nitro-prerender'];
 
 async function login(base) {
-  const r = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'demo@stockaccount.local', password: 'Demo123!' }) });
+  const r = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: sa.email ?? 'demo@stockaccount.local', password: sa.password ?? 'Demo123!' }) });
   const cookie = (r.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
   return { token: (await r.json()).accessToken, cookie };
 }
@@ -32,7 +36,7 @@ async function probe(ui, base, name, method, path, { headers = {}, body } = {}) 
   out.push({ ui, name, method, path: path.slice(0, 50), status, ct: (hdrs['content-type'] ?? '-').split(';')[0], server, csp: hdrs['content-security-policy'] ? 'yes' : 'no', leaks, sample: leaks.length ? text.slice(0, 400) : '' });
 }
 
-for (const [ui, base] of [['vue', vue], ['nuxt', nuxt]]) {
+for (const [ui, base] of [['vue', vue], ['nuxt', nuxt]].filter(([, b]) => b)) {
   const { token, cookie } = await login(base);
   const auth = { Authorization: `Bearer ${token}` };
   await probe(ui, base, 'unknown page route', 'GET', '/this/does/not/exist');

@@ -48,11 +48,14 @@ param(
     [string]$CachePrefix = 'sa:',
     [string]$RedisService = 'redis',
     [string]$RedisHost = 'localhost',
-    [ValidateRange(1, 65535)][int]$RedisPort = 6379
+    [ValidateRange(1, 65535)][int]$RedisPort = 6379,
+    # dev (default, ./backups) | staging (./backups/staging) | prod. Defaults to $env:STOCKACCOUNT_ENV. Files are read only from that environment's directory.
+    [ValidateSet('dev', 'staging', 'prod')][string]$Environment
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_common.ps1')
+if ($Environment) { $null = Use-StockEnvironment $Environment }
 
 $exitCode = 1
 $copiedIntoContainer = $null

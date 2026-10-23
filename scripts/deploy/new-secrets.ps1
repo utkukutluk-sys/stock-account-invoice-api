@@ -8,6 +8,7 @@
     APP_DB_PASSWORD is the least-privilege runtime login; db-migrate creates it / syncs it (ALTER LOGIN) on every "up".
   - BOOTSTRAP_ADMIN_PASSWORD: password of the first Admin created by the production deploy (db-migrate bootstrap). It is the
     ONE value you need to read from .env (log in, change it in the UI, then delete the line from .env).
+  - -Environment staging writes .env.staging (DOMAIN=localhost, LOCAL_TLS=internal, BACKUP_DIR=./backups/staging, default admin staging-admin@stockaccount.local); dev/prod write .env.
   - -AdminEmail sets BOOTSTRAP_ADMIN_EMAIL (asked interactively when missing); -Domain / -AcmeEmail set DOMAIN / ACME_EMAIL.
   Existing non-placeholder values are kept unless -Force. Secret values are never printed.
   NOTE: the SA password is applied by SQL Server only when the mssql data volume is created. Changing it for an existing
@@ -27,12 +28,14 @@ param(
     [string]$AdminEmail,
     # Production host name (DOMAIN) and Lets Encrypt e-mail (ACME_EMAIL).
     [string]$Domain,
-    [string]$AcmeEmail
+    [string]$AcmeEmail,
+    # dev/prod (default): .env. staging: .env.staging with DOMAIN=localhost, LOCAL_TLS=internal, a bootstrap admin and BACKUP_DIR=./backups/staging.
+    [ValidateSet('dev', 'staging', 'prod')][string]$Environment = 'dev'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
-$envFile = Join-Path $repo '.env'
+$envFile = Join-Path $repo $(if ($Environment -ceq 'staging') { '.env.staging' } else { '.env' })
 $example = Join-Path $repo '.env.example'
 
 function New-RandomBytes([int]$Count) {
@@ -73,6 +76,13 @@ $plain = [ordered]@{}
 if ($AdminEmail) { $plain['BOOTSTRAP_ADMIN_EMAIL'] = $AdminEmail.Trim() }
 if ($Domain) { $plain['DOMAIN'] = $Domain.Trim() }
 if ($AcmeEmail) { $plain['ACME_EMAIL'] = $AcmeEmail.Trim() }
+if ($Environment -ceq 'staging') {
+    # Staging is a local, production-like stack: Caddy local CA on localhost, admin created by the bootstrap step, own backup folder.
+    if (-not $plain.Contains('DOMAIN')) { $plain['DOMAIN'] = 'localhost' }
+    $plain['LOCAL_TLS'] = 'internal'
+    $plain['BACKUP_DIR'] = './backups/staging'
+    if (-not $plain.Contains('BOOTSTRAP_ADMIN_EMAIL') -and -not ($lines | Where-Object { $_ -cmatch '^\s*BOOTSTRAP_ADMIN_EMAIL\s*=\s*\S' })) { $plain['BOOTSTRAP_ADMIN_EMAIL'] = 'staging-admin@stockaccount.local' }
+}
 if (-not $plain.Contains('BOOTSTRAP_ADMIN_EMAIL')) {
     $existingEmail = $lines | Where-Object { $_ -cmatch '^\s*BOOTSTRAP_ADMIN_EMAIL\s*=\s*\S' } | Select-Object -First 1
     if (-not $existingEmail -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
@@ -84,7 +94,7 @@ foreach ($v in $plain.Values) { if ($v -cmatch '[\s#"''$]') { throw "Value '$v' 
 
 $seen = @{}
 $out = foreach ($line in $lines) {
-    if ($line -cmatch '^\s*(BOOTSTRAP_ADMIN_EMAIL|DOMAIN|ACME_EMAIL)\s*=') {
+    if ($line -cmatch '^\s*(BOOTSTRAP_ADMIN_EMAIL|DOMAIN|ACME_EMAIL|LOCAL_TLS|BACKUP_DIR)\s*=') {
         $key = $Matches[1]
         $seen[$key] = $true
         if ($plain.Contains($key)) { Write-Host "[secrets] $key set"; "$key=$($plain[$key])" } else { $line }

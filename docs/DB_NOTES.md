@@ -240,7 +240,7 @@ Also:
 `Invoke-DbSql` / `Invoke-InContainer` (docker target) call `Assert-DbContainerReady` first: the mssql container must be `running` and `healthy` (waits up to 60 s while `starting`). A stopped/missing container now fails with an actionable message instead of `OCI runtime exec failed: cannot exec in a stopped container`. `deploy.ps1` starts a stopped mssql before the pre-deploy backup and aborts the deploy if the backup fails; `rollback.ps1` starts mssql/redis before `restore.ps1`.
 
 ### 8.6 Off-site copies (S3-compatible bucket)
-Full operator procedure (Turkish, incl. disaster recovery on a new server): `docs/OFFSITE_BACKUP.md`.
+Full operator procedure (Turkish, incl. disaster recovery on a new server): `docs/DEPLOYMENT.md` (section "Sunucu dışı yedek").
 
 | Script / service | Purpose | Exit codes |
 |---|---|---|

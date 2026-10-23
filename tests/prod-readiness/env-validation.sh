@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Round 3 item 2: fail-fast startup validation of the API and ui-nuxt images (Production), secrets never logged,
-# and `docker compose config` failing on missing .env values. Usage: bash env-validation.sh [api-image] [nuxt-image]
+# and `docker compose config` failing on missing .env values. Usage: bash env-validation.sh [api-image] [nuxt-image]  (default: the staging release; only throw-away containers, no stack is touched)
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/_target.sh"; target_init "$@"; set -- "${TARGET_ARGS[@]}"
 export PATH="$PATH:/c/Users/PC/AppData/Local/Programs/DockerDesktop/resources/bin"
-API_IMAGE=${1:-stockaccount-api:1.5.8}
-NUXT_IMAGE=${2:-stockaccount-ui-nuxt:1.5.8}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# Default API image = the current staging release (read from its own release history). ui-nuxt is not part of staging/prod, so its
+# image check uses the newest locally built tag. Both only run as throw-away containers: no stack is touched.
+CUR=$(sed -n 's/.*"current": *"\([^"]*\)".*/\1/p' "$ROOT/scripts/deploy/.state/staging/releases.json" 2>/dev/null | head -1)
+API_IMAGE=${1:-stockaccount-api:${CUR:-local}}
+NUXT_IMAGE=${2:-$(docker images --format '{{.Repository}}:{{.Tag}}' stockaccount-ui-nuxt | grep -v ':sha-' | head -1)}
 SECRET_PW='LeakPw-7f3e9!Zq'          # must never appear in any log line
 SECRET_KEY='LEAKKEY-0123456789-abcdefghijklmnopqrstuvwxyz-XYZ'   # 50 bytes, valid length
 SHORT_KEY='LEAKSHORT-123'

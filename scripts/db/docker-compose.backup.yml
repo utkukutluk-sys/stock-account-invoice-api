@@ -14,7 +14,7 @@ services:
   mssql:
     volumes:
       # Same mount the main compose file declares; repeated so this override also works on its own.
-      - ./backups:/var/opt/mssql/backup
+      - ${BACKUP_DIR:-./backups}:/var/opt/mssql/backup
 
   mssql-backup:
     # Same pinned image as the mssql service (provides /opt/mssql-tools18/bin/sqlcmd); SQL Server itself is not started.
@@ -28,7 +28,7 @@ services:
       BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
       BACKUP_FIRST_DELAY: ${BACKUP_FIRST_DELAY:-120s}
     volumes:
-      - ./backups:/var/opt/mssql/backup
+      - ${BACKUP_DIR:-./backups}:/var/opt/mssql/backup
       - ./scripts/db/backup-loop.sh:/opt/stockaccount/backup-loop.sh:ro
     depends_on:
       mssql:
@@ -55,6 +55,6 @@ services:
       OFFSITE_MIN_KEEP: ${OFFSITE_MIN_KEEP:-3}
       OFFSITE_POLL_SECONDS: ${OFFSITE_POLL_SECONDS:-60}
     volumes:
-      - ./backups:/data:ro
+      - ${BACKUP_DIR:-./backups}:/data:ro
       - ./scripts/db/offsite-sync.sh:/opt/stockaccount/offsite-sync.sh:ro
     restart: unless-stopped

@@ -37,7 +37,8 @@ try {
     if ($LogFile) { Start-Transcript -LiteralPath $LogFile -Append | Out-Null; $transcript = $true }
     try { $cfg = Get-OffsiteConfig }
     catch { Write-Host "[offsite] $($_.Exception.Message)" -ForegroundColor Red; $exitCode = 2; throw [OperationCanceledException]::new() }
-    if (-not $BackupDir) { $BackupDir = Join-Path $script:RepoRoot 'backups' }
+    if (-not $BackupDir) { $BackupDir = Get-EnvironmentBackupDir (Get-ActiveEnvironmentName) }
+    Assert-BackupDirIsolated (Get-ActiveEnvironmentName) $BackupDir
     if (-not (Test-Path -LiteralPath $BackupDir)) { throw "Backup folder not found: $BackupDir" }
 
     $mode = if ($List) { 'list' } else { 'once' }

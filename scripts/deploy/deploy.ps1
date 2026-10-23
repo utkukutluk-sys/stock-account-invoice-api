@@ -6,14 +6,16 @@
   1. Pre-deploy backup via scripts/db/backup.ps1 -Target docker -Label pre-deploy-<version>. A failed backup aborts the
      deploy. Skipped only for a genuine first deploy (no mssql container and no mssql-data volume) or with -SkipBackup. A stopped mssql is started first.
   2. Builds api/ui-vue/ui-nuxt images tagged <name>:<version> and <name>:sha-<git sha>.
-  3. Records the release in scripts/deploy/.state/releases.json (git-ignored).
-  4. docker compose up -d (-Production: with docker-compose.prod.yml) with APP_VERSION=<version> (mssql/redis keep running; pinned images).
+  3. Records the release in the environment's history: scripts/deploy/.state/releases.json (dev), .state/staging/ or .state/prod/ (git-ignored).
+  4. docker compose up -d (-Environment staging|prod: with docker-compose.prod.yml, staging also docker-compose.staging.yml) with APP_VERSION=<version> (mssql/redis keep running; pinned images).
   5. Waits for /health/ready (200) served by the new api image. On failure: automatic rollback to the previous version
      including the database restore from the pre-deploy backup (unless -NoAutoRollback).
   Exit code 0 = deployed, 1 = failed (rolled back if possible).
 
 .EXAMPLE
-  ./scripts/deploy/deploy.ps1 -Version 1.2.0
+  ./scripts/deploy/deploy.ps1 -Version 1.2.0                       # dev stack
+.EXAMPLE
+  ./scripts/deploy/deploy.ps1 -Environment staging -Version 1.6.0  # https://localhost:8443
 #>
 [CmdletBinding()]
 param(
@@ -22,8 +24,12 @@ param(
     # Default: http://localhost:5080/health/ready (dev stack); with -Production the api container is asked from inside
     # the compose network ('internal': there are no host ports). Pass 'internal' or any URL to override.
     [string]$HealthUrl,
-    # Production on a VPS: merges docker-compose.prod.yml (Production env, no host ports, Caddy + Uptime Kuma, no ui-nuxt).
+    # Alias for -Environment prod (VPS: Production env, no host ports, Caddy + Uptime Kuma, no ui-nuxt).
     [switch]$Production,
+    # dev (default): docker-compose.yml, project "stockaccount". staging: + docker-compose.prod.yml + docker-compose.staging.yml, project
+    # "stockaccount-staging", .env.staging, https://localhost:8443. prod: + docker-compose.prod.yml, project "stockaccount-prod". Each environment has its
+    # own release history (scripts/deploy/.state/<env>/) and backup folder.
+    [ValidateSet('dev', 'staging', 'prod')][string]$Environment = 'dev',
     [switch]$SkipBackup,
     [switch]$NoAutoRollback,
     # Extra compose file merged over docker-compose.yml for THIS deploy only (e.g. scripts/deploy/drills/crash-api.override.yml
@@ -38,14 +44,21 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deploy-common.ps1')
 
 if ($Version -cnotmatch $script:VersionPattern) { throw "Invalid version '$Version' (expected e.g. 1.2.0)." }
-if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot '.env'))) { throw '.env not found: run scripts/deploy/new-secrets.ps1 first.' }
+if ($Production) {
+    if ($PSBoundParameters.ContainsKey('Environment') -and $Environment -cne 'prod') { throw "-Production means -Environment prod; it conflicts with -Environment $Environment." }
+    $Environment = 'prod'
+}
+$def = Initialize-DeployEnvironment $Environment
+$Production = [switch]$def.Production   # staging and prod both use docker-compose.prod.yml
+$envFileName = $def.EnvFile
+if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot $envFileName))) { throw "$envFileName not found: run scripts/deploy/new-secrets.ps1$(if ($Environment -ceq 'staging') { ' -Environment staging' }) first." }
 
-if (-not $HealthUrl) { $HealthUrl = if ($Production) { 'internal' } else { 'http://localhost:5080/health/ready' } }
+if (-not $HealthUrl) { $HealthUrl = $def.ReadyUrl }
 if ($Production) {
     foreach ($key in 'DOMAIN') {
-        if (-not (Get-EnvSetting $key)) { throw "$key is not set in .env (public host name, e.g. app.example.com). See docs/DEPLOYMENT.md." }
+        if (-not (Get-EnvSetting $key)) { throw "$key is not set in $envFileName (public host name, e.g. app.example.com). See docs/DEPLOYMENT.md." }
     }
-    if (-not (Get-EnvSetting 'ACME_EMAIL') -and -not (Get-EnvSetting 'LOCAL_TLS')) { throw 'ACME_EMAIL is not set in .env (Lets Encrypt e-mail). See docs/DEPLOYMENT.md.' }
+    if (-not (Get-EnvSetting 'ACME_EMAIL') -and -not (Get-EnvSetting 'LOCAL_TLS')) { throw "ACME_EMAIL is not set in $envFileName (Lets Encrypt e-mail). See docs/DEPLOYMENT.md." }
 }
 $extraFiles = @()
 foreach ($o in @($ComposeOverride)) {
@@ -53,8 +66,9 @@ foreach ($o in @($ComposeOverride)) {
         if ($part.Trim()) { $extraFiles += (Resolve-Path -LiteralPath (Join-Path $script:RepoRoot $part.Trim()) -ErrorAction Stop).Path }
     }
 }
-Set-ComposeFiles -ProductionMode:$Production -Extra $extraFiles
-if ($Production) { Write-Deploy 'PRODUCTION mode: docker-compose.yml + docker-compose.prod.yml' 'Yellow' }
+Set-ComposeFiles -Extra $extraFiles
+Assert-VersionNotUsedByDev $Version
+Write-Deploy "environment $($def.Name): project $($script:ComposeProject), compose files $($def.ComposeFiles -join ' + '), env file $envFileName" 'Yellow'
 if ($extraFiles.Count -gt 0) { Write-Deploy "compose override(s) for this deploy: $($ComposeOverride -join ', ')" 'Yellow' }
 $history = Read-History
 $previous = $history.current
@@ -80,7 +94,7 @@ try {
         if (-not (Test-Path -LiteralPath $backupScript)) { throw "backup script missing: $backupScript" }
         Write-Deploy "pre-deploy backup (label pre-deploy-$Version)"
         $manifest = $null
-        try { $manifest = & $backupScript -Target docker -Label "pre-deploy-$Version" } catch { Write-Deploy "backup error: $($_.Exception.Message)" 'Red' }
+        try { $manifest = & $backupScript -Target docker -Label "pre-deploy-$Version" -Environment $Environment } catch { Write-Deploy "backup error: $($_.Exception.Message)" 'Red' }
         if ($LASTEXITCODE -ne 0 -or -not $manifest) { throw 'pre-deploy backup FAILED - deploy aborted, nothing was changed (use -SkipBackup only if you accept the risk).' }
         $backupFile = @($manifest)[-1].file
         Write-Deploy "backup OK: $backupFile" 'Green'
@@ -132,11 +146,11 @@ catch {
     Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'failed'; previous = $previous; preDeployBackup = $backupFile; error = $_.Exception.Message }
     Save-History $history
 
-    Set-ComposeFiles -ProductionMode:$Production # rollback uses the plain compose file(s), never the drill overrides
+    Set-ComposeFiles # rollback uses the plain compose file(s), never the drill overrides
     if (-not $NoAutoRollback -and $previous -and $previous -cne $Version -and (Test-ImageExists "stockaccount-api:$previous")) {
         Write-Deploy "automatic rollback to $previous" 'Yellow'
         $rollbackArgs = @{ Version = $previous; From = $Version; Reason ="auto: deploy of $Version failed"; HealthUrl = $HealthUrl }
-        if ($Production) { $rollbackArgs.Production = $true }
+        $rollbackArgs.Environment = $Environment
         if ($backupFile) { $rollbackArgs.RestoreDatabase = $true; $rollbackArgs.BackupFile = $backupFile }
         & (Join-Path $PSScriptRoot 'rollback.ps1') @rollbackArgs
         if ($LASTEXITCODE -ne 0) { Write-Deploy 'AUTOMATIC ROLLBACK FAILED - manual intervention required' 'Red' }

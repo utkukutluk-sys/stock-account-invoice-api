@@ -15,6 +15,8 @@
   ./scripts/deploy/rollback.ps1
 .EXAMPLE
   ./scripts/deploy/rollback.ps1 -Version 1.1.0 -RestoreDatabase
+.EXAMPLE
+  ./scripts/deploy/rollback.ps1 -Environment staging -RestoreDatabase
 #>
 [CmdletBinding()]
 param(
@@ -23,8 +25,10 @@ param(
     [string]$BackupFile,
     [int]$ReadyTimeoutSeconds = 240,
     [string]$HealthUrl,
-    # Production stack (docker-compose.prod.yml). Detected automatically when the last deploy was a -Production one.
+    # Alias for -Environment prod.
     [switch]$Production,
+    # dev (default) | staging | prod: selects compose project, env file, release history and backup folder (see deploy.ps1).
+    [ValidateSet('dev', 'staging', 'prod')][string]$Environment = 'dev',
     [string]$Reason = 'manual',
     # Version being replaced (deploy.ps1 passes the failed version); default: the recorded current release.
     [string]$From
@@ -33,10 +37,14 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deploy-common.ps1')
 
+if ($Production) {
+    if ($PSBoundParameters.ContainsKey('Environment') -and $Environment -cne 'prod') { throw "-Production means -Environment prod; it conflicts with -Environment $Environment." }
+    $Environment = 'prod'
+}
+$def = Initialize-DeployEnvironment $Environment
+Set-ComposeFiles
 $history = Read-History
-if (-not $Production -and ($history.PSObject.Properties.Name -contains 'production') -and $history.production) { $Production = [switch]$true }
-Set-ComposeFiles -ProductionMode:$Production
-if (-not $HealthUrl) { $HealthUrl = if ($Production) { 'internal' } else { 'http://localhost:5080/health/ready' } }
+if (-not $HealthUrl) { $HealthUrl = $def.ReadyUrl }
 $current = if ($From) { $From } else { $history.current }
 $started = Get-Date
 
@@ -68,7 +76,7 @@ try {
         Invoke-Docker (@('compose', 'stop') + $script:AppServices) | Out-Null
         Assert-DataServicesUp
         Write-Deploy "restoring database from $BackupFile"
-        & $restoreScript -Target docker -File $BackupFile -Force
+        & $restoreScript -Target docker -File $BackupFile -Force -Environment $Environment
         if ($LASTEXITCODE -ne 0) { throw "database restore from $BackupFile FAILED" }
         Write-Deploy 'database restored' 'Green'
 

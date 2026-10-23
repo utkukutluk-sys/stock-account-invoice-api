@@ -20,7 +20,46 @@ Tarayıcı --HTTPS--> Caddy (80/443, otomatik Let's Encrypt sertifikası)
 - Sadece **Vue arayüzü** yayındadır. `ui-nuxt` depoda durur ama canlıda çalıştırılmaz.
 - Uptime Kuma (izleme) sadece sunucunun kendi içinden (`127.0.0.1:3001`) erişilebilir; SSH tüneliyle bağlanırsınız.
 - Her şey Docker Compose ile yönetilir: `docker-compose.yml` (temel) + `docker-compose.prod.yml` (canlı ayarları).
-  Deploy script'i ikisini birlikte kullanır; siz `-Production` parametresini vermeniz yeter.
+  Deploy script'i ikisini birlikte kullanır; siz `-Environment prod` parametresini vermeniz yeter (`-Production` aynı işi yapan eski takma addır).
+
+## Ortamlar
+
+Aynı depo dört ortamda çalışır. Her ortamın **kendi compose projesi, ağı, volume'ları, env dosyası, sürüm geçmişi ve yedek klasörü** vardır;
+birinde yapılan işlem (deploy, geri alma, yedek, yedek silme) ötekilere dokunmaz.
+
+| Ortam | Ne için | Nasıl çalışır | Compose projesi | Env dosyası | Yedekler | Adres |
+|---|---|---|---|---|---|---|
+| **dev** | Günlük geliştirme, demo veri (`admin@stockaccount.local`) | `docker compose up -d` veya `deploy.ps1 -Version x.y.z` | `stockaccount` | `.env` | `backups/` | `http://localhost:5173` (Vue), `:3000` (Nuxt), `:5080` (API) |
+| **test** | Otomatik doğrulama: birim + entegrasyon testleri, Playwright E2E, Postman | `dotnet test`, `e2e`, `postman`; **CI**'da (GitHub Actions `ci.yml`) her push/PR'da; tek kullanımlık veritabanları | kalıcı ortam yok | CI sırları | yok | yok |
+| **staging** | Prod'a çıkmadan önce prod'un yakın benzeri: Production modu, Caddy + HTTPS, rate limit, demo veri **yok**, bootstrap yönetici | `deploy.ps1 -Environment staging -Version x.y.z` | `stockaccount-staging` | `.env.staging` | `backups/staging/` | `https://localhost:8443` (Uptime Kuma: `http://127.0.0.1:3002`) |
+| **prod** | Gerçek kullanıcılar, tek Linux VPS | `deploy.ps1 -Environment prod -Version x.y.z` | `stockaccount-prod` | `.env` (sunucuda) | `backups/prod/` (+ sunucu dışı) | `https://<alan-adı>` |
+
+Staging, dev yığınıyla **aynı makinede yan yana** çalışır ve onunla hiçbir kaynak paylaşmaz: ayrı ağ (`172.30.40.0/24`; dev `172.30.0.0/24`),
+yalnızca Caddy'nin 8080/8443 portları (ve `127.0.0.1:3002`'de Uptime Kuma) yayınlanır; API, SQL Server ve Redis'in host portu yoktur.
+Caddy yerel sertifika otoritesi kullanır (`LOCAL_TLS=internal`): tarayıcı bir kez uyarı verir, `curl` için `-k` gerekir.
+Dosyalar: `docker-compose.staging.yml` (prod ayarlarının üstüne eklenir), `.env.staging` (git'e girmez).
+
+```powershell
+# bir kez: .env.staging üretir (DOMAIN=localhost, LOCAL_TLS=internal, bootstrap yönetici staging-admin@stockaccount.local)
+.\scripts\deploy\new-secrets.ps1 -Environment staging
+# dağıt (ilk seferde derler); giriş parolası .env.staging içindeki BOOTSTRAP_ADMIN_PASSWORD
+.\scripts\deploy\deploy.ps1 -Environment staging -Version 1.6.0
+.\scripts\deploy\rollback.ps1 -Environment staging -RestoreDatabase      # önceki sürüme + deploy öncesi yedekten veritabanı
+# durdur / başlat (veriler volume'larda kalır)
+docker compose -p stockaccount-staging --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml stop
+docker compose -p stockaccount-staging --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml start
+# prod-hazırlık denemeleri: varsayılan hedef staging; dev yığınını yalnızca --i-know-this-is-dev ile kabul eder
+bash tests/prod-readiness/proxy-ip-check.sh
+node tests/prod-readiness/fuzz-errors.mjs
+```
+
+**Sürüm akışı:** `dev` (geliştir; birim/entegrasyon/E2E ve CI yeşil) -> `staging` (`deploy.ps1 -Environment staging -Version x.y.z`, ardından **smoke**:
+giriş yap, `https://localhost:8443/api/health/ready` = 200, `proxy-ip-check.sh` ve `fuzz-errors.mjs` temiz, gerekirse
+`rollback.ps1 -Environment staging -RestoreDatabase` denemesi) -> `prod` (aynı `x.y.z` ile `deploy.ps1 -Environment prod`). Staging'de denenmemiş sürüm prod'a gitmez.
+
+Güvenceler: staging/prod deploy'u, dev yığınının çalıştırdığı imaj etiketini (örn. `stockaccount-api:1.5.8`) yeniden derlemeyi reddeder.
+Yedek, geri yükleme ve saklama (retention) yalnızca çağrılan ortamın klasöründe çalışır; başka ortamın klasörü verilirse hata verir
+(`tests/prod-readiness/backup-isolation.test.ps1`). Dev yedekleri (`backups/`) bu yüzden staging veya prod saklama kuralıyla silinemez.
 
 ## 1. Neye ihtiyacınız var
 
@@ -129,11 +168,11 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ```bash
 cd ~
-git clone <DEPO_URL> StockAccountApp
+git clone https://github.com/utkukutluk-sys/stock-account-invoice-api.git StockAccountApp
 cd StockAccountApp
 
 # SQL Server yedek klasörü: SQL Server konteyneri (kullanıcı 10001) buraya yazar
-mkdir -p backups && chmod 777 backups
+mkdir -p backups/prod && chmod 777 backups backups/prod
 ```
 
 ### 3.1 Gizli bilgileri üretin (`.env`)
@@ -156,7 +195,7 @@ arayüzden ekleyebilirsiniz. Kaydetmek için `Ctrl+O`, `Enter`; çıkmak için `
 ## 4. İlk deploy
 
 ```bash
-pwsh ./scripts/deploy/deploy.ps1 -Version 1.0.0 -Production
+pwsh ./scripts/deploy/deploy.ps1 -Environment prod -Version 1.0.0
 ```
 
 Ne yapar: imajları derler (ilk seferde 5-10 dakika), veritabanını oluşturur/geçirir (db-migrate), **ilk yöneticiyi
@@ -202,7 +241,7 @@ Notlar:
 ```bash
 cd ~/StockAccountApp
 git pull
-pwsh ./scripts/deploy/deploy.ps1 -Version 1.0.1 -Production
+pwsh ./scripts/deploy/deploy.ps1 -Environment prod -Version 1.0.1
 ```
 
 - Sürüm numarası her seferinde yenisi olmalı (`1.0.1`, `1.1.0`, ...). Önceki sürümün imajı rollback için sunucuda kalır.
@@ -214,12 +253,12 @@ pwsh ./scripts/deploy/deploy.ps1 -Version 1.0.1 -Production
 Yeni sürümde sorun fark ettiyseniz:
 
 ```bash
-pwsh ./scripts/deploy/rollback.ps1                          # bir önceki sürüme (kodu geri alır)
-pwsh ./scripts/deploy/rollback.ps1 -RestoreDatabase         # + veritabanını deploy öncesi yedekten geri yükler
-pwsh ./scripts/deploy/rollback.ps1 -Version 1.0.0           # belirli bir sürüme
+pwsh ./scripts/deploy/rollback.ps1 -Environment prod                          # bir önceki sürüme (kodu geri alır)
+pwsh ./scripts/deploy/rollback.ps1 -Environment prod -RestoreDatabase         # + veritabanını deploy öncesi yedekten geri yükler
+pwsh ./scripts/deploy/rollback.ps1 -Environment prod -Version 1.0.0           # belirli bir sürüme
 ```
 
-`-Production` yazmanız gerekmez: script son deploy'un canlı modda yapıldığını hatırlar. Yeni sürüm veritabanı şemasını
+`-Environment prod` yazmayı unutmayın (eski `-Production` takma adı da çalışır): geçmiş ve yedekler ortama özeldir, yazmazsanız script geliştirme (dev) ortamını hedefler. Yeni sürüm veritabanı şemasını
 değiştirdiyse (yeni migration) eski kod çalışmaz; bu durumda `-RestoreDatabase` kullanın. Dikkat: `-RestoreDatabase`, deploy'dan
 sonra girilen verileri geri alır.
 
@@ -228,14 +267,15 @@ sonra girilen verileri geri alır.
 Her deploy öncesi otomatik yedek alınır. Ayrıca elle ve zamanlanmış yedek:
 
 ```bash
-# Elle yedek (dosya ~/StockAccountApp/backups altına düşer)
-pwsh ./scripts/db/backup.ps1 -Target docker -Label manuel
+# Elle yedek (dosya ~/StockAccountApp/backups/prod altına düşer; prod/staging yedekleri dev dosyalarına asla dokunmaz)
+pwsh ./scripts/db/backup.ps1 -Environment prod -Target docker -Label manuel
 
 # Zamanlanmış yedek (varsayılan 24 saatte bir; yedek servisi arka planda çalışır)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml -f scripts/db/docker-compose.backup.yml up -d
+# (.env içinde BACKUP_DIR=./backups/prod tanımlı olmalı; yedek servisi aynı klasörü kullanır)
 
 # Geri yükleme (önce uygulamayı durdurun: dcp stop api)
-pwsh ./scripts/db/restore.ps1 -Target docker -Latest -Label scheduled
+pwsh ./scripts/db/restore.ps1 -Environment prod -Target docker -Latest -Label scheduled
 ```
 
 Ayrıntılar: `docs/DB_NOTES.md` §8. **Yedekler aynı sunucuda durduğu sürece sunucu kaybında yedek de kaybolur**, aşağıdaki bölümü
@@ -243,8 +283,89 @@ mutlaka kurun.
 
 ### Sunucu dışı yedek
 
-<!-- Bu bölüm yedekleme ekibi tarafından doldurulacak (S3 uyumlu depolama, OFFSITE_* ayarları, geri yükleme testi). -->
-_Bu bölüm henüz doldurulmadı._
+Yedekler (`backups/prod/*.bak` + `.json` manifest) sunucunun kendi diskinde kalırsa disk/VPS kaybında hepsi gider. Bu yüzden her
+başarılı yedeğin bir kopyası S3 uyumlu bir bucket'a yüklenir. **Önerilen sağlayıcı: Cloudflare R2** (çıkış/egress ücreti yok, 10 GB
+ücretsiz); alternatif: **Backblaze B2** (S3 API). AWS S3, Hetzner Object Storage, MinIO gibi her S3 uyumlu depo da çalışır.
+Sunucuda Docker dışında bir şey gerekmez: `rclone`, sabitlenmiş `rclone/rclone:1.68.2` imajıyla container içinde çalışır.
+
+#### 1. Bucket ve anahtar hazırlığı (bir kez, sizin yapacağınız)
+
+**Cloudflare R2 (önerilen)**
+1. Cloudflare panelinde *R2 Object Storage* -> *Create bucket*: **özel (private)** bir bucket (örn. `stockaccount-backups`). Herkese açık erişimi (public access / r2.dev) **açmayın**.
+2. *R2* -> *Manage R2 API Tokens* -> *Create API token*: yetki **Object Read & Write**, kapsam **yalnızca bu bucket** (hesap geneli token vermeyin).
+3. Ekranda bir kez gösterilen **Access Key ID** ve **Secret Access Key** değerlerini parola yöneticinize kaydedin.
+4. S3 adresi (endpoint): `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (`<ACCOUNT_ID>` R2 sayfasında ve token ekranında yazar). Bölge: `auto`.
+
+**Backblaze B2 (alternatif)**
+1. *Buckets* -> *Create a Bucket*: **Private**. Dosya sürümlemeyi açık bırakmanız iyi olur.
+2. *Application Keys* -> *Add a New Application Key*: **yalnızca bu bucket'a** kısıtlı, *Read and Write* erişimli anahtar. `keyID` = erişim anahtarı, `applicationKey` = gizli anahtar (bir kez gösterilir).
+3. Endpoint: bucket ayrıntı sayfasındaki *S3 Endpoint*, örn. `https://s3.eu-central-003.backblazeb2.com`. Bölge: endpoint'teki bölge adı (örn. `eu-central-003`).
+
+Değerleri sunucudaki `.env` dosyasına yazın (`.env` git'e girmez; anahtarlar başka yere yazılmaz, loglara basılmaz). `.env.example` içinde
+yorum satırı olarak hazır bir R2 örneği vardır:
+
+| Değişken | Anlamı | Örnek (R2) |
+|---|---|---|
+| `OFFSITE_ENABLED` | `true` = yedek sonrası otomatik yükleme açık (varsayılan `false`) | `true` |
+| `OFFSITE_S3_ENDPOINT` | S3 adresi; **AWS S3 için boş bırakın** | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
+| `OFFSITE_S3_REGION` | Bölge (R2 için `auto`, B2 için endpoint'teki bölge, AWS için örn. `eu-central-1`) | `auto` |
+| `OFFSITE_S3_BUCKET` | Bucket adı | `stockaccount-backups` |
+| `OFFSITE_S3_ACCESS_KEY` / `OFFSITE_S3_SECRET_KEY` | Bucket'a kısıtlı erişim anahtarı çifti | |
+| `OFFSITE_PREFIX` | Bucket içindeki klasör (varsayılan `stockaccount`; staging otomatik `stockaccount-staging` kullanır) | `prod` |
+| `OFFSITE_RETENTION_DAYS` | Bucket'ta bu günden eski yedekler silinir (varsayılan 30, `0` = hiç silme) | `30` |
+| `OFFSITE_MIN_KEEP` | Ne kadar eski olursa olsun en yeni N yedek asla silinmez (varsayılan 3) | `3` |
+
+Doğrulama: `pwsh ./scripts/db/offsite-sync.ps1 -List` (bucket erişimini ve anahtarı sınar), sonra
+`pwsh ./scripts/db/backup.ps1 -Environment prod -Label deneme` çalıştırıp çıktıda `Off-site copy` adımının başarıyla bittiğini görün.
+
+#### 2. Nasıl çalışır
+- `scripts/db/offsite-sync.ps1`: yalnızca manifesti (`.json`) olan, yani tamamlanmış yedekleri yükler (önce `.bak`, en son manifest),
+  her dosyayı **boyut + checksum** ile doğrular (`rclone check`), sonra bucket'taki eski yedekleri `OFFSITE_RETENTION_DAYS` /
+  `OFFSITE_MIN_KEEP` kurallarına göre temizler. Herhangi bir adım başarısızsa çıkış kodu sıfırdan farklıdır (1 = yükleme/doğrulama, 2 = ayar eksik).
+- `backup.ps1`: `OFFSITE_ENABLED=true` ise her yedekten sonra yüklemeyi kendisi çalıştırır. Bu örtük modda bucket arızası
+  deploy/restore akışlarını **bloklamaz** (uyarı verir, yerel yedek sağlam kalır). `-Offsite` verilirse (zamanlanmış görev) yükleme
+  hatası çıkış kodu 5 ile görünür; `-SkipOffsite` yüklemeyi atlar.
+- Her ortam yalnızca kendi yedek klasörünü yükler (prod: `backups/prod`, staging: `backups/staging`, dev: `backups`) ve kendi bucket klasörünü (`OFFSITE_PREFIX`) kullanır.
+- Compose sidecar: `docker compose -f docker-compose.yml -f docker-compose.prod.yml -f scripts/db/docker-compose.backup.yml up -d` komutundaki `offsite-sync`
+  servisi `BACKUP_DIR` klasörünü 60 sn'de bir izler; yeni yedek çıkınca yükler, en az 6 saatte bir yeniden doğrular ve budar.
+  `OFFSITE_ENABLED=true` değilse boşta bekler.
+
+#### 3. Linux sunucuda zamanlama (PowerShell 7)
+```bash
+# systemd timer (önerilen) - root gerekir; -Install vermezseniz unit dosyaları yalnızca ekrana basılır
+sudo pwsh ./scripts/db/register-backup-task.ps1 -Target docker -At 02:30 -RetentionCount 14 -Offsite -Install
+systemctl list-timers stockaccount-db-backup-docker.timer
+journalctl -u stockaccount-db-backup-docker.service
+# veya cron (kullanıcının crontab'ına yazar)
+pwsh ./scripts/db/register-backup-task.ps1 -Target docker -At 02:30 -Offsite -Scheduler cron -Install
+# kaldırma: aynı komut + -Unregister
+```
+Alternatif: compose sidecar'ı (`mssql-backup` + `offsite-sync`) kullanmak; o zaman systemd/cron gerekmez.
+Zamanlanmış görevin prod klasörünü kullanması için ortamında `STOCKACCOUNT_ENV=prod` tanımlı olmalıdır (systemd unit'ine `Environment=STOCKACCOUNT_ENV=prod`,
+cron satırının başına `STOCKACCOUNT_ENV=prod` ekleyin).
+
+#### 4. Felaket kurtarma (yeni sunucu -> kur -> indir -> geri yükle -> deploy)
+1. **Yeni sunucu**: Linux VPS'e Docker (Compose v2) ve PowerShell 7 kurun (bu rehberin 2. bölümü); depoyu klonlayın (3. bölüm).
+2. **`.env`**: eski sunucunun `.env` kopyasını (parola yöneticisi/güvenli kasadan) yerleştirin. Özellikle `MSSQL_SA_PASSWORD`,
+   JWT/diğer sırlar ve `OFFSITE_S3_*` değerleri aynı olmalı. `.env` kayıpsa `scripts/deploy/new-secrets.ps1` ile yeni sırlar üretilir
+   (o durumda kullanıcı oturumları/şifreli veriler yeniden oluşur), `OFFSITE_S3_*` değerlerini bucket sağlayıcısından yeniden girin.
+3. **Boş veritabanı sunucusunu başlatın**: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d mssql redis` ve `ps` ile `healthy` olmasını bekleyin.
+   (API'yi henüz başlatmayın.)
+4. **Yedeği indirin**:
+   ```bash
+   export STOCKACCOUNT_ENV=prod                                       # prod klasörünü ve compose projesini seçer
+   pwsh ./scripts/db/offsite-restore.ps1 -List                        # bucket'taki yedekler
+   pwsh ./scripts/db/offsite-restore.ps1 -Latest -Label scheduled     # en yeni zamanlanmış yedek (veya -File <ad>.bak)
+   ```
+   Dosyalar `./backups/prod` içine iner; SHA-256 manifestle karşılaştırılır, uyuşmazlıkta hiçbir şey bırakılmaz (çıkış kodu 1).
+5. **Geri yükleyin**: `pwsh ./scripts/db/restore.ps1 -Environment prod -Target docker -File <indirilen>.bak -Force`
+   (CHECKDB, migration head ve tablo satır sayıları manifestle doğrulanır; çıkış 0 olmalı).
+6. **Deploy**: `pwsh ./scripts/deploy/deploy.ps1 -Environment prod -Version <x.y.z>`. Migration head yedektekiyle aynıysa şema
+   değişmez, yeni sürümse migration uygulanır. `curl https://<alan-adı>/api/health/ready` ve bir giriş denemesiyle kontrol edin.
+7. **Zamanlamayı yeniden kurun** (bölüm 3) ve `pwsh ./scripts/db/offsite-sync.ps1` ile yüklemenin çalıştığını doğrulayın.
+
+Notlar: yedek yalnızca aynı veya daha yeni SQL Server ana sürümüne geri yüklenir (prod imajı 2022). Kurtarma noktası, bucket'taki
+son yedeğin saatidir; yedekleme sıklığı kadar veri kaybı olabilir. Yılda en az bir kez 4.-5. adımı geçici bir sunucuda deneyin.
 
 ## 9. İzleme (Uptime Kuma)
 
@@ -295,7 +416,7 @@ Eski sürüm imajları rollback içindir; disk dolarsa son 2-3 sürüm dışınd
 | `Invalid configuration ... placeholder` (API açılmıyor) | `.env` hâlâ örnek değerlerde: `pwsh ./scripts/deploy/new-secrets.ps1` çalıştırın. |
 | `did not become ready within ... s` | `dcp logs --tail 200 api` ve `dcp logs --tail 50 db-migrate` bakın. Script otomatik geri alma yapar. |
 | `mssql` sağlıklı olmuyor, RAM yetersiz | Sunucu belleği 4 GB'tan az olabilir; `free -h` bakın, swap ekleyin (2.5) veya sunucuyu büyütün. |
-| `permission denied` (yedek klasörü) | `chmod 777 ~/StockAccountApp/backups` |
+| `permission denied` (yedek klasörü) | `chmod 777 ~/StockAccountApp/backups ~/StockAccountApp/backups/prod` |
 | Giriş sırasında `429` | Dakikada 10 deneme sınırı; 1 dakika bekleyin. |
 | Parolamı unuttum | Giriş ekranından kurtarma yoktur. Başka bir Admin hesabı varsa onunla sıfırlatın; yoksa en son yedekten dönüp yeni bir Admin için destek isteyin. Bu yüzden parolayı parola yöneticisinde saklayın. |
 | `docker: permission denied` | `deploy` kullanıcısı `docker` grubunda mı (`groups`)? Çıkıp yeniden girin. |
