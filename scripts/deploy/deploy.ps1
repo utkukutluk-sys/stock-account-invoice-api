@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   1. Pre-deploy backup via scripts/db/backup.ps1 -Target docker -Label pre-deploy-<version>. A failed backup aborts the
-     deploy. Skipped only for the very first deploy (no running mssql service yet) or with -SkipBackup.
+     deploy. Skipped only for a genuine first deploy (no mssql container and no mssql-data volume) or with -SkipBackup. A stopped mssql is started first.
   2. Builds api/ui-vue/ui-nuxt images tagged <name>:<version> and <name>:sha-<git sha>.
   3. Records the release in scripts/deploy/.state/releases.json (git-ignored).
   4. docker compose up -d with APP_VERSION=<version> (mssql/redis keep running; pinned images).
@@ -24,7 +24,7 @@ param(
     [switch]$NoAutoRollback,
     # Extra compose file merged over docker-compose.yml for THIS deploy only (e.g. scripts/deploy/drills/crash-api.override.yml
     # to drill the automatic rollback with a container that really crashes). The rollback always uses the plain compose file.
-    [string]$ComposeOverride,
+    [string[]]$ComposeOverride,
     # For releases that change the compose topology (networks, fixed IPs): after the backup and the build, run
     # "docker compose down --remove-orphans" (volumes are KEPT) before "up". A running stack blocks network recreation.
     [switch]$RecreateStack
@@ -37,11 +37,15 @@ if ($Version -cnotmatch $script:VersionPattern) { throw "Invalid version '$Versi
 if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot '.env'))) { throw '.env not found: run scripts/deploy/new-secrets.ps1 first.' }
 
 if ($ComposeOverride) {
-    $overridePath = (Resolve-Path -LiteralPath (Join-Path $script:RepoRoot $ComposeOverride) -ErrorAction Stop).Path
-    $env:COMPOSE_FILE = (Join-Path $script:RepoRoot 'docker-compose.yml') + [IO.Path]::PathSeparator + $overridePath
-    Write-Deploy "compose override for this deploy: $ComposeOverride" 'Yellow'
+    $files = @((Join-Path $script:RepoRoot 'docker-compose.yml'))
+    foreach ($o in $ComposeOverride) {
+        foreach ($part in ($o -split ';')) {
+            if ($part.Trim()) { $files += (Resolve-Path -LiteralPath (Join-Path $script:RepoRoot $part.Trim()) -ErrorAction Stop).Path }
+        }
+    }
+    $env:COMPOSE_FILE = $files -join [IO.Path]::PathSeparator
+    Write-Deploy "compose override(s) for this deploy: $($ComposeOverride -join ', ')" 'Yellow'
 }
-
 $history = Read-History
 $previous = $history.current
 $sha = Get-GitSha
@@ -54,19 +58,23 @@ try {
     if ($SkipBackup) {
         Write-Deploy 'backup skipped (-SkipBackup)' 'Yellow'
     }
-    elseif (-not (Test-ServiceRunning 'mssql')) {
-        Write-Deploy 'mssql is not running yet (first deploy): no database to back up' 'Yellow'
+    elseif (-not (Test-DatabaseStackExists)) {
+        Write-Deploy 'no mssql container and no mssql-data volume exist (genuine first deploy): no database to back up' 'Yellow'
     }
     else {
+        # The DB exists (container in any state, or at least its volume): it must be running+healthy to be backed up.
+        # A stopped mssql is NOT a first deploy - start it and wait (never skip the backup silently).
+        try { Assert-DataServicesUp }
+        catch { throw "mssql exists but could not be started for the pre-deploy backup - deploy aborted, nothing was changed: $($_.Exception.Message)" }
         $backupScript = Join-Path $script:RepoRoot 'scripts\db\backup.ps1'
         if (-not (Test-Path -LiteralPath $backupScript)) { throw "backup script missing: $backupScript" }
         Write-Deploy "pre-deploy backup (label pre-deploy-$Version)"
-        $manifest = & $backupScript -Target docker -Label "pre-deploy-$Version"
-        if ($LASTEXITCODE -ne 0 -or -not $manifest) { throw 'pre-deploy backup FAILED - deploy aborted, nothing was changed.' }
+        $manifest = $null
+        try { $manifest = & $backupScript -Target docker -Label "pre-deploy-$Version" } catch { Write-Deploy "backup error: $($_.Exception.Message)" 'Red' }
+        if ($LASTEXITCODE -ne 0 -or -not $manifest) { throw 'pre-deploy backup FAILED - deploy aborted, nothing was changed (use -SkipBackup only if you accept the risk).' }
         $backupFile = @($manifest)[-1].file
         Write-Deploy "backup OK: $backupFile" 'Green'
     }
-
     # ---- 2. build + tag
     $env:APP_VERSION = $Version
     Write-Deploy 'building images'
@@ -75,6 +83,15 @@ try {
         Invoke-Docker @('tag', "${image}:$Version", "${image}:sha-$sha") -Quiet | Out-Null
     }
     Write-Deploy "tagged $($script:AppImages -join ', ') as :$Version and :sha-$sha"
+
+    # ---- 2b. topology change detection (BUG-12): a changed network / mssql / redis definition makes "compose up" recreate the
+    #          stateful services and then fail with "network has active endpoints". Detect it up front and use the recreate path.
+    $topology = @(Get-TopologyChangeReasons)
+    if ($topology.Count -gt 0 -and -not $RecreateStack) {
+        Write-Deploy 'compose topology change detected - using the recreate path automatically (volumes kept):' 'Yellow'
+        $topology | ForEach-Object { Write-Deploy "  $_" 'Yellow' }
+        $RecreateStack = [switch]$true
+    }
 
     # ---- 3. record
     Add-HistoryEvent $history @{ version = $Version; sha = $sha; status = 'deploying'; previous = $previous; preDeployBackup = $backupFile }
@@ -85,7 +102,7 @@ try {
         Write-Deploy 'recreating the stack (compose down --remove-orphans, volumes kept)' 'Yellow'
         Invoke-Docker @('compose', 'down', '--remove-orphans') | Out-Null
     }
-    Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
+    Invoke-ComposeUpWithRetry
 
     # ---- 5. readiness
     if (-not (Wait-Ready -Version $Version -HealthUrl $HealthUrl -TimeoutSeconds $ReadyTimeoutSeconds)) {

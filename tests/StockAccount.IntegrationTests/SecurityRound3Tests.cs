@@ -110,6 +110,10 @@ public sealed class SecurityRound3Tests(ApiFixture fx)
     [InlineData("8.0.0.0/8", null)]
     [InlineData("172.0.0.0/8", null)] // wider than 172.16.0.0/12
     [InlineData("::/1", "8000::/1")]
+    [InlineData("::ffff:0:0/96", null)] // BUG-13: all IPv4-mapped addresses = trusting all IPv4
+    [InlineData("::ffff:0:0/95", null)]
+    [InlineData("2000::/3", null)] // global unicast
+    [InlineData("::ffff:8.8.8.0/120", null)]
     public void Production_rejects_forwarded_networks_outside_private_ranges(string first, string? second)
     {
         var overrides = new Dictionary<string, string?>

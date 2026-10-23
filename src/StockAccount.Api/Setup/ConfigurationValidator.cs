@@ -38,9 +38,23 @@ public static class ConfigurationValidator
 
     /// <summary>True when the whole network is contained in one private/loopback range.</summary>
     public static bool IsPrivateOrLoopback(IPNetwork network) =>
-        PrivateRanges.Any(r => r.BaseAddress.AddressFamily == network.BaseAddress.AddressFamily
+        !IsIPv4MappedOrAmbiguous(network)
+        && PrivateRanges.Any(r => r.BaseAddress.AddressFamily == network.BaseAddress.AddressFamily
             && network.PrefixLength >= r.PrefixLength
             && r.Contains(network.BaseAddress));
+
+    /// <summary>
+    /// BUG-13: an IPv6 network whose base is an IPv4-mapped address (::ffff:0:0/96 and anything overlapping it) is
+    /// matched against IPv4 peers by the forwarded-headers middleware, so it must not be judged as "IPv6". Rejected
+    /// outright: write the IPv4 CIDR instead.
+    /// </summary>
+    private static bool IsIPv4MappedOrAmbiguous(IPNetwork network)
+    {
+        var b = network.BaseAddress;
+        if (b.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6) return false;
+        if (b.IsIPv4MappedToIPv6) return true;
+        return network.PrefixLength < 96 && network.Contains(IPAddress.Parse("::ffff:0.0.0.0"));
+    }
 
     private static bool UsesSaLogin(string connectionString)
     {

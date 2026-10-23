@@ -307,3 +307,12 @@ limited by their TCP peer address.
     -ReadyTimeoutSeconds 60` → DEPLOY FAILED, then the automatic rollback to 1.5.0 with DB restore (CHECKDB clean,
     342 rows match the manifest) and cache flush, in 12 s. Exit 1.
 - Note for local tools: use `127.0.0.1,14333` for sqlcmd, or rely on the new `[::1]` bindings.
+
+### 7.8 Round-4 fixes: BUG-12 (deploy/rollback on topology change) and BUG-13
+
+- **Topology detection (deploy.ps1)**: after the build and before `up`, `docker compose up -d --no-build --dry-run` is parsed (ordinal `-cmatch`). A `Container ...mssql|redis... Recreate` or `Network ... Removing|Recreate` line means compose would replace stateful services/networks (the "network has active endpoints" failure). The recreate path (`compose down --remove-orphans`, volumes kept) is then used automatically and the reasons are printed. `-RecreateStack` stays as a manual override. `-ComposeOverride` now takes several files.
+- **Backup is never skipped silently**: "first deploy" only when there is no mssql container and no `stockaccount_mssql-data` volume. If mssql exists but is stopped/unhealthy it is started (`Assert-DataServicesUp`) and awaited before `backup.ps1`; a failing backup aborts the deploy before anything changes.
+- **Rollback (rollback.ps1, also the automatic one)**: before the restore it ensures mssql + redis run and are healthy (`up -d mssql redis`; on "active endpoints" ONE `down --remove-orphans` (no `-v`) + `up`), restores, then `Invoke-ComposeUpWithRetry` brings the app services up (same one-shot retry) and waits for `/health/ready`.
+- **db/_common.ps1**: `Assert-DbContainerReady` runs before every docker-target exec (waits up to 60 s for `starting`, otherwise fails with "Service 'mssql' is not ready (...). Start it ... docker compose up -d mssql").
+- Helpers live in `scripts/deploy/_deploy-common.ps1`; all comparisons are ordinal (`-c*`) because of tr-TR. Drills: `scripts/deploy/drills/network-change.override.yml` (+ `crash-api.override.yml`).
+- **BUG-13**: `ConfigurationValidator.IsPrivateOrLoopback` now rejects any IPv6 `KnownNetworks` entry whose base is IPv4-mapped (`::ffff:0:0/96`, `::ffff:8.8.8.0/120`) or whose range covers `::ffff:0:0/96` (`/1`..`/95`); tests in `SecurityRound3Tests`. Use the IPv4 CIDR instead.

@@ -234,3 +234,7 @@ Also:
 | Task Scheduler (`register-backup-task.ps1 -RunNow`, then `-Unregister`) | scheduled backup + transcript written |
 | Negative tests | tampered .bak → SHA-256 mismatch, aborted before touching the DB; `-File ..\..\Windows\evil.bak` → rejected; DB name `x];DROP DATABASE y;--` → rejected by validation; retention keep 2 → oldest removed |
 | BUG-9 re-drill (docker): backup `r9stale` → create stock (id 14), GET by id + list until `X-Cache: HIT` → restore | with `-SkipCacheFlush`: bug reproduced (id 14 still 200 HIT, list totalCount 1; id 14 was then handed out again to the next new stock, which is the id-reuse hazard). Default: "6 sa:* keys removed" → GET /stocks/14 **404** (not served from cache), list **X-Cache MISS, totalCount 0**. Flush unit checks: 1 212 keys removed with a foreign key `keepme:1` kept; RESP client 1 203 keys; zero matching keys → Flushed/0 (idempotent); unreachable port → WARNING; prefix `*` rejected |
+
+### 8.5 Container precheck (BUG-12)
+
+`Invoke-DbSql` / `Invoke-InContainer` (docker target) call `Assert-DbContainerReady` first: the mssql container must be `running` and `healthy` (waits up to 60 s while `starting`). A stopped/missing container now fails with an actionable message instead of `OCI runtime exec failed: cannot exec in a stopped container`. `deploy.ps1` starts a stopped mssql before the pre-deploy backup and aborts the deploy if the backup fails; `rollback.ps1` starts mssql/redis before `restore.ps1`.

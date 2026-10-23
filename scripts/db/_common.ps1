@@ -114,6 +114,28 @@ function New-DbContext {
     return [pscustomobject]$ctx
 }
 
+# docker target: the service container must be running (and healthy; waits up to $WaitSeconds while "starting") before any
+# exec - otherwise fail with an actionable message instead of a raw "cannot exec in a stopped container" (BUG-12).
+function Assert-DbContainerReady {
+    param([Parameter(Mandatory)]$Ctx, [int]$WaitSeconds = 60)
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $why = ''
+    do {
+        $ps = Invoke-Native $Ctx.Docker ($Ctx.ComposeArgs + @('ps', '-a', '-q', $Ctx.Service))
+        $cid = ($ps.Lines | Where-Object { $_ -cmatch '^[0-9a-f]{12,64}$' } | Select-Object -First 1)
+        if (-not $cid) { $why = "no '$($Ctx.Service)' container exists"; break }
+        $ins = Invoke-Native $Ctx.Docker @('inspect', '--format', '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}', $cid)
+        $parts = (($ins.Lines -join '').Trim()).Split('|')
+        if ($ins.ExitCode -ne 0 -or $parts.Count -lt 1) { $why = "cannot inspect '$($Ctx.Service)'"; break }
+        $status = $parts[0]; $health = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+        if ($status -cne 'running') { $why = "container is '$status'"; break }
+        if ($health -ceq '' -or $health -ceq 'healthy') { return }
+        $why = "container health is '$health'"
+        if ($health -ceq 'unhealthy') { break }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+    throw "Service '$($Ctx.Service)' is not ready ($why). Start it and wait for healthy first: docker compose up -d $($Ctx.Service)  (check: docker compose ps, docker compose logs $($Ctx.Service))."
+}
 <#
   Executes a T-SQL script (may contain GO) against master and returns the output lines.
   Result sets are printed without headers, columns separated by '|'. Throws on any SQL error.
@@ -146,6 +168,7 @@ function Invoke-DbSql {
             finally { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }
         }
         'docker' {
+            Assert-DbContainerReady -Ctx $Ctx
             # The script travels base64-encoded in an environment variable (no stdin/BOM or argument-quoting
             # issues on Windows PowerShell 5.1); the password travels in SQLCMDPASSWORD. Neither is printed.
             $hadPwd = Test-Path Env:SQLCMDPASSWORD
@@ -177,6 +200,7 @@ function Invoke-DbSql {
 # Runs a command inside the mssql container (no SQL). Returns output lines; throws on failure.
 function Invoke-InContainer {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string[]]$Command, [switch]$AllowFailure)
+    Assert-DbContainerReady -Ctx $Ctx
     $r = Invoke-Native $Ctx.Docker ($Ctx.ComposeArgs + @('exec', '-T', $Ctx.Service) + $Command)
     if ($r.ExitCode -ne 0 -and -not $AllowFailure) { throw "Container command failed ($($Command -join ' ')): $($r.Lines -join ' ')" }
     return $r

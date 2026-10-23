@@ -8,7 +8,7 @@
   - -RestoreDatabase: also restores the database from the pre-deploy backup taken right before the current release was
     deployed (or -BackupFile <name>.bak) via scripts/db/restore.ps1. This is how the schema goes back: EF down-migrations
     are not used, and the API refuses to start on a database that has migrations newer than its code.
-  Steps: stop api/ui services -> (restore DB) -> compose up -d --no-build with APP_VERSION=<target> -> wait for
+  Steps: stop api/ui services -> ensure mssql+redis healthy (start them; one compose down+up retry on 'active endpoints') -> (restore DB) -> compose up -d --no-build with APP_VERSION=<target> -> wait for
   /health/ready -> record. Exit code 0 = rolled back, 1 = failed.
 
 .EXAMPLE
@@ -57,8 +57,11 @@ try {
         $restoreScript = Join-Path $script:RepoRoot 'scripts\db\restore.ps1'
         if (-not (Test-Path -LiteralPath $restoreScript)) { throw "restore script missing: $restoreScript" }
 
+        # BUG-12: a failed deploy may have stopped/recreated mssql+redis: make sure they run and are healthy before any exec.
+        $env:APP_VERSION = $Version
         Write-Deploy "stopping application services before the restore"
         Invoke-Docker (@('compose', 'stop') + $script:AppServices) | Out-Null
+        Assert-DataServicesUp
         Write-Deploy "restoring database from $BackupFile"
         & $restoreScript -Target docker -File $BackupFile -Force
         if ($LASTEXITCODE -ne 0) { throw "database restore from $BackupFile FAILED" }
@@ -71,7 +74,7 @@ try {
     }
 
     $env:APP_VERSION = $Version
-    Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
+    Invoke-ComposeUpWithRetry
     if (-not (Wait-Ready -Version $Version -HealthUrl $HealthUrl -TimeoutSeconds $ReadyTimeoutSeconds)) {
         throw "$Version did not become ready within $ReadyTimeoutSeconds s after rollback."
     }

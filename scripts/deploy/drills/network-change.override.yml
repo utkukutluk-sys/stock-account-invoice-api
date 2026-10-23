@@ -1,0 +1,28 @@
+# DRILL ONLY - never use for a real release.
+# Changes the compose topology like the 1.4.0 -> 1.5.x release did: the "default" network gets another subnet (so compose
+# has to REMOVE and re-create it) and mssql/redis join an extra network (=> they are recreated). Without topology detection,
+# "docker compose up" then fails with "network stockaccount_default has active endpoints" after mssql was already stopped.
+#   ./scripts/deploy/deploy.ps1 -Version 9.9.8-drill -ComposeOverride scripts/deploy/drills/network-change.override.yml
+# Combine with crash-api.override.yml (COMPOSE_FILE separated by ';' on Windows, ':' elsewhere) to drill the rollback too:
+#   ./scripts/deploy/deploy.ps1 -Version 9.9.9-drill -ComposeOverride "scripts/deploy/drills/network-change.override.yml;scripts/deploy/drills/crash-api.override.yml"
+services:
+  mssql:
+    networks: [backend, drill]
+  redis:
+    networks: [backend, drill]
+  ui-vue:
+    networks:
+      default:
+        ipv4_address: 172.31.0.10
+  ui-nuxt:
+    networks:
+      default:
+        ipv4_address: 172.31.0.11
+networks:
+  drill: {}
+  default:
+    ipam:
+      config: !override
+        - subnet: 172.31.0.0/24
+          gateway: 172.31.0.1
+          ip_range: 172.31.0.128/25

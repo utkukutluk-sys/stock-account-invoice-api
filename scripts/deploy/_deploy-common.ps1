@@ -114,3 +114,89 @@ function Get-GitSha {
     }
     finally { Pop-Location }
 }
+
+# ---------------------------------------------------------------------------------------------------------------
+# Data-service helpers (BUG-12). All comparisons are ordinal (-c*): tr-TR breaks -match/-eq with 'I'/'i'.
+# ---------------------------------------------------------------------------------------------------------------
+$script:DataServices = @('mssql', 'redis')
+
+# "Running" / "Created" / "Exited" ... + health ("healthy", "starting", "unhealthy" or '' without a healthcheck); $null = no container.
+function Get-ServiceState([string]$Service) {
+    $cid = ((Invoke-Docker @('compose', 'ps', '-a', '-q', $Service) -AllowFailure -Quiet) -join '').Trim()
+    if (-not $cid) { return $null }
+    $fmt = '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}'
+    $line = ((Invoke-Docker @('inspect', '--format', $fmt, $cid) -AllowFailure -Quiet) -join '').Trim()
+    if ($script:LastDockerExit -ne 0 -or -not $line) { return $null }
+    $parts = $line.Split('|')
+    return [pscustomobject]@{ Status = $parts[0]; Health = $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) }
+}
+
+function Test-ServiceHealthy([string]$Service) {
+    $s = Get-ServiceState $Service
+    return ($null -ne $s -and $s.Status -ceq 'running' -and ($s.Health -ceq 'healthy' -or $s.Health -ceq ''))
+}
+
+function Wait-ServiceHealthy([string]$Service, [int]$TimeoutSeconds = 180) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ServiceHealthy $Service) { return $true }
+        Start-Sleep -Seconds 3
+    }
+    return $false
+}
+
+# True when the stateful DB data already exists (container of any state, or the named volume).
+function Test-DatabaseStackExists {
+    if ($null -ne (Get-ServiceState 'mssql')) { return $true }
+    $vol = ((Invoke-Docker @('volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=stockaccount', '--filter', 'label=com.docker.compose.volume=mssql-data') -AllowFailure -Quiet) -join '').Trim()
+    return [bool]$vol
+}
+
+# Makes sure mssql and redis run and are healthy. Starts them when needed; if "compose up" fails because the old network
+# still has active endpoints (half-recreated stack), does ONE "compose down --remove-orphans" (volumes kept) + up.
+# Throws with an actionable message otherwise. Does nothing when both are already healthy.
+function Assert-DataServicesUp([int]$TimeoutSeconds = 180) {
+    if ((Test-ServiceHealthy 'mssql') -and (Test-ServiceHealthy 'redis')) { return }
+    Write-Deploy 'mssql/redis not both running+healthy: starting them' 'Yellow'
+    $out = Invoke-Docker (@('compose', 'up', '-d', '--no-build') + $script:DataServices) -AllowFailure
+    if ($script:LastDockerExit -ne 0) {
+        if (($out -join "`n") -cmatch 'active endpoints') {
+            Write-Deploy 'network has active endpoints: one compose down --remove-orphans (volumes kept), then up again' 'Yellow'
+            Invoke-Docker @('compose', 'down', '--remove-orphans') | Out-Null
+            Invoke-Docker (@('compose', 'up', '-d', '--no-build') + $script:DataServices) | Out-Null
+        }
+        else { throw "could not start mssql/redis: $(($out | Select-Object -Last 3) -join ' | ')" }
+    }
+    foreach ($svc in $script:DataServices) {
+        if (-not (Wait-ServiceHealthy $svc $TimeoutSeconds)) {
+            throw "$svc did not become healthy within $TimeoutSeconds s (check: docker compose logs $svc)."
+        }
+    }
+    Write-Deploy 'mssql and redis are running and healthy' 'Green'
+}
+
+# Dry-run of "compose up": returns human-readable reasons when the running stateful services (mssql/redis) would be
+# recreated or a network replaced/removed (compose then fails with "network ... has active endpoints"). Empty = safe.
+function Get-TopologyChangeReasons {
+    $out = Invoke-Docker @('compose', 'up', '-d', '--no-build', '--dry-run') -AllowFailure -Quiet
+    if ($script:LastDockerExit -ne 0) {
+        return @("compose up --dry-run failed ($(($out | Select-Object -Last 2) -join ' | ')): assuming topology change")
+    }
+    $reasons = @()
+    foreach ($line in $out) {
+        if ($line -cmatch 'Container\s+\S*(mssql|redis)\S*\s+Recreate\b') { $reasons += $line.Trim() }
+        elseif ($line -cmatch 'Network\s+\S+\s+(Removing|Recreate)\b') { $reasons += $line.Trim() }
+    }
+    return @($reasons)
+}
+
+# "compose up -d --no-build" (whole stack). On "network ... has active endpoints" does one compose down --remove-orphans
+# (volumes kept) and retries once. Throws on any other failure.
+function Invoke-ComposeUpWithRetry {
+    $out = Invoke-Docker @('compose', 'up', '-d', '--no-build') -AllowFailure
+    if ($script:LastDockerExit -eq 0) { return }
+    if (($out -join "`n") -cnotmatch 'active endpoints') { throw "docker compose up failed (exit $($script:LastDockerExit))." }
+    Write-Deploy 'network has active endpoints: one compose down --remove-orphans (volumes kept), then up again' 'Yellow'
+    Invoke-Docker @('compose', 'down', '--remove-orphans') | Out-Null
+    Invoke-Docker @('compose', 'up', '-d', '--no-build') | Out-Null
+}
