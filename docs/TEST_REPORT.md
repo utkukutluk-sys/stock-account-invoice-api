@@ -2,6 +2,27 @@
 
 Date: 2026-10-22 · Contract: `docs/CONTRACT.md` v1.1 · Environment: Windows 11, .NET SDK 10.0.402, Node 24.22, SQL Server Express `.\SQLEXPRESS`, Docker 29.9.2, Playwright 1.64.1 (Chromium), newman 6.
 
+## Round 5 — Verification of BUG-12 / BUG-13 fixes (2026-10-23, commit 374e1cc, shared stack)
+
+All checks run on the shared stack. Row counts (Stocks/Invoices/StockTrans/AspNetUsers/Companies) were 17/19/36/3/6 before and after every step. Stack left on **1.5.8**, 5/5 healthy, standard topology (`stockaccount_default` + `stockaccount_backend`; a leftover empty `stockaccount_drill` network from the drills remains, harmless).
+
+| # | Check | Result | Time |
+|---|---|---|---|
+| 1 | Plain `deploy.ps1 -Version 1.5.5` of a release whose network changed (`network-change.override.yml`), no `-RecreateStack` | **PASS.** Log: "compose topology change detected - using the recreate path automatically" (mssql/redis Recreate, network Removing). Deployed, ready 200, data intact. Reverse change (plain 1.5.6 back to standard topology) also auto-detected and OK. | 27 s / 25 s |
+| 2 | Changed topology + `crash-api.override.yml` (9.9.9-drill, ReadyTimeout 60) | **PASS.** Deploy failed (not ready in 60 s), automatic rollback to 1.5.6 incl. DB restore from the pre-deploy backup, ready 200, counts unchanged. | 111 s total (incl. build; rollback 23 s) |
+| 3 | "Active endpoints" retry: extra container `qa-extra` attached to `stockaccount_default`, deploy needing network removal | Real error triggered. Script printed "network has active endpoints: one compose down --remove-orphans ... then up again", retry failed too (a foreign endpoint cannot be removed by compose - expected), deploy exit 1, automatic rollback to 1.5.6 with DB restore succeeded, stack healthy, data intact. So: no hang/half-state, fails safe; it does not (and cannot) auto-recover the foreign endpoint. Extra container removed afterwards. | 36 s |
+| 4 | `docker compose stop mssql`, then `rollback.ps1 -RestoreDatabase` | **PASS.** "mssql/redis not both running+healthy: starting them", restored, ready 200, healthy. | 24 s |
+| 5 | BUG-13: Production + `KnownNetworks=::ffff:0:0/96` | **PASS**, exit 2 (env-validation.sh: all cases PASS on the 1.5.8 image). Added case `::ffff:8.8.8.0/120` (exit 2) to the script. | - |
+| 6 | `dotnet test StockAccount.slnx -c Release` | **Green**: UnitTests 99/99, IntegrationTests 179/179. | - |
+
+Observations (not bugs): `rollback.ps1` without `-Version` goes to the release before the current one (after an auto-rollback to 1.5.6, a manual rollback went to 1.5.5), which is the documented semantics. The "active endpoints" error message for a foreign container could name the offending container; low priority (Backend).
+
+| ID | Status |
+|---|---|
+| BUG-12 | **Verified** |
+| BUG-13 | **Verified** |
+| New bugs | none |
+
 ## Round 4 — Verification of the round-3 fixes, crash drill, BUG-12 (2026-10-23, git da73350, shared stack)
 
 Scripts (re-runnable): `tests/prod-readiness/proxy-ip-check.sh` (BUG-7, now uses 127.0.0.1), `env-validation.sh` (BUG-11; default images now 1.5.2; the interrupted edit from the previous run was reviewed and kept, plus 4 extra CIDR cases) and the new `round4-checks.sh` (BUG-7 port bindings, BUG-8, BUG-9 with a real backup and restore, BUG-10). The stack was found on **1.4.0 with the old topology** (network 172.18/16, ports on 0.0.0.0). It was moved to **1.5.2** (see BUG-12) and left there, all 5 services healthy, `releases.json current = 1.5.2`, data unchanged (stocks 11, invoices 16, stock-trans 31, users 3).
