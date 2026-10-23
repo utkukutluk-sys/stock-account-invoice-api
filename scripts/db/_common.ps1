@@ -9,7 +9,7 @@
 
 Set-StrictMode -Version 3.0
 
-$script:RepoRoot           = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$script:RepoRoot           = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
 $script:DbNamePattern      = '^[A-Za-z_][A-Za-z0-9_]{0,127}$'
 $script:LabelPattern       = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 $script:BackupFilePattern  = '^[A-Za-z0-9_][A-Za-z0-9._-]{0,200}\.bak$'
@@ -35,18 +35,20 @@ function Get-DockerExe {
     if ($env:DOCKER_EXE) { $candidates += $env:DOCKER_EXE }
     $cmd = Get-Command docker -ErrorAction SilentlyContinue
     if ($cmd) { $candidates += $cmd.Source }
-    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe')
-    $candidates += (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe')
+    if ($env:LOCALAPPDATA) { $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Programs', 'DockerDesktop', 'resources', 'bin', 'docker.exe') }
+    if ($env:ProgramFiles) { $candidates += [IO.Path]::Combine($env:ProgramFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe') }
     foreach ($c in $candidates) { if ($c -and (Test-Path -LiteralPath $c)) { return $c } }
     throw 'docker CLI not found (set DOCKER_EXE or add docker to PATH).'
 }
 
-function Get-SaPassword {
-    if ($env:MSSQL_SA_PASSWORD) { return $env:MSSQL_SA_PASSWORD }
+# Reads one KEY=value from the process environment, else from .env. Returns $null when absent/empty. Never logs it.
+function Get-DotEnvValue([string]$Name) {
+    $fromEnv = [Environment]::GetEnvironmentVariable($Name)
+    if ($fromEnv) { return $fromEnv }
     $envFile = Join-Path $script:RepoRoot '.env'
-    if (-not (Test-Path -LiteralPath $envFile)) { throw ".env not found at $envFile and MSSQL_SA_PASSWORD is not set." }
+    if (-not (Test-Path -LiteralPath $envFile)) { return $null }
     foreach ($line in [IO.File]::ReadAllLines($envFile)) {
-        if ($line -cmatch '^\s*MSSQL_SA_PASSWORD\s*=\s*(.*)$') {
+        if ($line -cmatch ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*)$')) {
             $value = $Matches[1].Trim()
             if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
                 $value = $value.Substring(1, $value.Length - 2)
@@ -54,7 +56,13 @@ function Get-SaPassword {
             if ($value) { return $value }
         }
     }
-    throw "MSSQL_SA_PASSWORD not found in $envFile."
+    return $null
+}
+
+function Get-SaPassword {
+    $v = Get-DotEnvValue 'MSSQL_SA_PASSWORD'
+    if ($v) { return $v }
+    throw 'MSSQL_SA_PASSWORD is neither in the environment nor in .env.'
 }
 
 # Runs a native executable without letting PS 5.1 turn stderr into terminating errors.
@@ -506,4 +514,99 @@ function Clear-AppCacheTcp {
         return [pscustomobject]@{ Status = 'Failed'; Deleted = 0; Message = $_.Exception.Message }
     }
     finally { $client.Close() }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Off-site backup (rclone in a pinned container -> any S3-compatible bucket). Secrets travel only as environment
+# variables of the docker CLI process ("-e NAME" without a value), never on a command line, in a file or in output.
+# ---------------------------------------------------------------------------------------------------------------
+$script:RcloneImage = 'rclone/rclone:1.68.2@sha256:74c51b8817e5431bd6d7ed27cb2a50d8ee78d77f6807b72a41ef6f898845942b'
+
+function Test-OffsiteEnabled {
+    $v = Get-DotEnvValue 'OFFSITE_ENABLED'
+    return [bool]($v -and (@('true', '1', 'yes', 'on') -contains $v.Trim().ToLowerInvariant()))
+}
+
+# Reads + validates OFFSITE_* from the environment / .env. Throws on a missing or malformed setting.
+function Get-OffsiteConfig {
+    $c = [ordered]@{
+        Endpoint      = (Get-DotEnvValue 'OFFSITE_S3_ENDPOINT')
+        Region        = (Get-DotEnvValue 'OFFSITE_S3_REGION')
+        Bucket        = (Get-DotEnvValue 'OFFSITE_S3_BUCKET')
+        AccessKey     = (Get-DotEnvValue 'OFFSITE_S3_ACCESS_KEY')
+        SecretKey     = (Get-DotEnvValue 'OFFSITE_S3_SECRET_KEY')
+        Prefix        = (Get-DotEnvValue 'OFFSITE_PREFIX')
+        RetentionDays = (Get-DotEnvValue 'OFFSITE_RETENTION_DAYS')
+        MinKeep       = (Get-DotEnvValue 'OFFSITE_MIN_KEEP')
+    }
+    if ($null -eq $c.Prefix) { $c.Prefix = 'stockaccount' }
+    if (-not $c.RetentionDays) { $c.RetentionDays = '30' }
+    if (-not $c.MinKeep) { $c.MinKeep = '3' }
+    $missing = @('Bucket', 'AccessKey', 'SecretKey' | Where-Object { -not $c[$_] })
+    if ($missing.Count) { throw "Off-site backup is not configured: set OFFSITE_S3_BUCKET, OFFSITE_S3_ACCESS_KEY and OFFSITE_S3_SECRET_KEY in .env (missing: $($missing -join ', '))." }
+    Assert-Pattern $c.Bucket '^[a-z0-9][a-z0-9.-]{1,62}$' 'OFFSITE_S3_BUCKET'
+    if ($c.Prefix -cnotmatch '^[A-Za-z0-9._/-]*$' -or $c.Prefix.Contains('..') -or $c.Prefix.StartsWith('/')) { throw "Invalid OFFSITE_PREFIX '$($c.Prefix)'." }
+    if ($c.Endpoint) { Assert-Pattern $c.Endpoint '^https?://[A-Za-z0-9.:_-]+/?$' 'OFFSITE_S3_ENDPOINT' }
+    if ($c.Region) { Assert-Pattern $c.Region '^[A-Za-z0-9-]{1,32}$' 'OFFSITE_S3_REGION' }
+    Assert-Pattern $c.RetentionDays '^\d{1,5}$' 'OFFSITE_RETENTION_DAYS'
+    Assert-Pattern $c.MinKeep '^\d{1,4}$' 'OFFSITE_MIN_KEEP'
+    return [pscustomobject]$c
+}
+
+# Runs `docker run --rm <rclone image>` with the S3 settings as RCLONE_CONFIG_OFFSITE_* env vars and $HostDir at /data.
+# $ContainerArgs is everything after the image name; $StdinText (optional) is piped in (used to run offsite-sync.sh).
+# OFFSITE_DOCKER_BACKUP_DIR (optional) = the path the Docker daemon sees for $HostDir (when this script itself runs
+# inside a container that talks to the host's Docker socket); OFFSITE_DOCKER_NETWORK (optional) = --network.
+function Invoke-OffsiteContainer {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][string]$HostDir,
+        [Parameter(Mandatory)][string[]]$ContainerArgs,
+        [string]$StdinText = $null,
+        [switch]$ReadOnlyData,
+        [string]$Entrypoint
+    )
+    $docker = Get-DockerExe
+    $mountDir = if ($env:OFFSITE_DOCKER_BACKUP_DIR) { $env:OFFSITE_DOCKER_BACKUP_DIR } else { (Resolve-Path -LiteralPath $HostDir).Path }
+    if ($mountDir -cmatch '[,"\r\n]') { throw "Unsafe backup directory path for docker: $mountDir" }
+    $vars = [ordered]@{
+        RCLONE_CONFIG_OFFSITE_TYPE              = 's3'
+        RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID     = $Config.AccessKey
+        RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY = $Config.SecretKey
+        RCLONE_CONFIG_OFFSITE_ENDPOINT          = $Config.Endpoint
+        RCLONE_CONFIG_OFFSITE_REGION            = $Config.Region
+        RCLONE_CONFIG_OFFSITE_PROVIDER          = $(if ($Config.Endpoint) { 'Other' } else { 'AWS' })
+        RCLONE_CONFIG_OFFSITE_NO_CHECK_BUCKET   = 'true'
+        OFFSITE_S3_BUCKET                       = $Config.Bucket
+        OFFSITE_PREFIX                          = $Config.Prefix
+        OFFSITE_RETENTION_DAYS                  = $Config.RetentionDays
+        OFFSITE_MIN_KEEP                        = $Config.MinKeep
+    }
+    $dargs = @('run', '--rm')
+    if ($null -ne $StdinText) { $dargs += '-i' }
+    if ($env:OFFSITE_DOCKER_NETWORK) {
+        Assert-Pattern $env:OFFSITE_DOCKER_NETWORK '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$' 'OFFSITE_DOCKER_NETWORK'
+        $dargs += @('--network', $env:OFFSITE_DOCKER_NETWORK)
+    }
+    foreach ($k in $vars.Keys) { $dargs += @('-e', $k) }
+    $mountSpec = $mountDir + ':/data'
+    if ($ReadOnlyData) { $mountSpec += ':ro' }
+    $dargs += @('-v', $mountSpec)
+    if ($Entrypoint) { $dargs += @('--entrypoint', $Entrypoint) }
+    $dargs += $script:RcloneImage
+    $dargs += $ContainerArgs
+
+    $saved = @{}
+    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, [string]$vars[$k]) }
+    try { return (Invoke-Native $docker $dargs $StdinText) }
+    finally { foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+}
+
+# Prints container output; defence in depth: the keys are masked if they ever show up.
+function Write-OffsiteLines($Config, [string[]]$Lines) {
+    foreach ($l in $Lines) {
+        $t = "$l"
+        foreach ($s in @($Config.SecretKey, $Config.AccessKey)) { if ($s) { $t = $t.Replace($s, '***') } }
+        if ($t.Trim()) { Write-Host $t }
+    }
 }

@@ -33,6 +33,8 @@ param(
     [string]$ComposeFile,
     [string]$Service = 'mssql',
     [switch]$ChainBase,
+    [switch]$Offsite,
+    [switch]$SkipOffsite,
     [string]$LogFile
 )
 
@@ -140,8 +142,27 @@ ORDER BY b.backup_set_id DESC;
         }
     }
 
+
+    # ---- off-site copy (rclone -> S3-compatible bucket), after the local backup has fully succeeded ----
+    $exitAfter = 0
+    $implicit = (-not $SkipOffsite) -and (-not $Offsite) -and (Test-OffsiteEnabled) -and ((Get-LabelFamily $Label) -cne 'pre-restore')
+    if ($Offsite -or $implicit) {
+        Write-Step 'Off-site copy (offsite-sync.ps1)'
+        $null = & (Join-Path $PSScriptRoot 'offsite-sync.ps1') -BackupDir $loc.HostDir
+        if ($LASTEXITCODE -ne 0) {
+            if ($Offsite) {
+                # Requested explicitly (scheduled task / cron): the local backup is fine, but the job must show up as failed.
+                Write-Host "[db] OFF-SITE COPY FAILED (offsite-sync.ps1 exit $LASTEXITCODE); the local backup $fileName is intact. Fix the bucket settings and run scripts/db/offsite-sync.ps1." -ForegroundColor Red
+                $exitAfter = 5
+            }
+            else {
+                # Implicit (OFFSITE_ENABLED): never block callers such as deploy.ps1 / restore.ps1 on a bucket outage.
+                Write-Host "[db] WARNING: off-site copy failed (exit $LASTEXITCODE); the local backup is intact. Run scripts/db/offsite-sync.ps1 to retry." -ForegroundColor Yellow
+            }
+        }
+    }
     [pscustomobject]$manifest
-    $exitCode = 0
+    $exitCode = $exitAfter
 }
 catch {
     Write-Host "[db] BACKUP FAILED: $($_.Exception.Message)" -ForegroundColor Red

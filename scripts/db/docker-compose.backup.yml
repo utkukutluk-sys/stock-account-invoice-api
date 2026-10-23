@@ -8,6 +8,7 @@
 # backups. Files land in ./backups on the host; restore with
 #   ./scripts/db/restore.ps1 -Target docker -Latest -Label scheduled
 # Settings come from .env: BACKUP_INTERVAL (e.g. 6h, 24h), BACKUP_RETENTION, BACKUP_FIRST_DELAY.
+# The "offsite-sync" service below uploads finished backups to an S3 bucket when OFFSITE_ENABLED=true (docs/DB_NOTES.md 8.6).
 # Relative paths resolve against the project directory (the repo root).
 services:
   mssql:
@@ -32,4 +33,28 @@ services:
     depends_on:
       mssql:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Off-site copy (optional): uploads every completed backup (.bak + .json) from ./backups to an S3-compatible bucket,
+  # verifies size + checksum, prunes the bucket after OFFSITE_RETENTION_DAYS (never the newest OFFSITE_MIN_KEEP).
+  # Idle (does nothing) unless OFFSITE_ENABLED=true in .env. Polls ./backups every 60 s, so a new scheduled backup is
+  # uploaded within about a minute. Keys are passed only as environment variables (no config file). See docs/DB_NOTES.md 8.6.
+  offsite-sync:
+    image: rclone/rclone:1.68.2@sha256:74c51b8817e5431bd6d7ed27cb2a50d8ee78d77f6807b72a41ef6f898845942b
+    entrypoint: ["/bin/sh", "/opt/stockaccount/offsite-sync.sh", "loop"]
+    environment:
+      OFFSITE_ENABLED: ${OFFSITE_ENABLED:-false}
+      RCLONE_CONFIG_OFFSITE_TYPE: s3
+      RCLONE_CONFIG_OFFSITE_ENDPOINT: ${OFFSITE_S3_ENDPOINT:-}
+      RCLONE_CONFIG_OFFSITE_REGION: ${OFFSITE_S3_REGION:-}
+      RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID: ${OFFSITE_S3_ACCESS_KEY:-}
+      RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY: ${OFFSITE_S3_SECRET_KEY:-}
+      OFFSITE_S3_BUCKET: ${OFFSITE_S3_BUCKET:-}
+      OFFSITE_PREFIX: ${OFFSITE_PREFIX:-stockaccount}
+      OFFSITE_RETENTION_DAYS: ${OFFSITE_RETENTION_DAYS:-30}
+      OFFSITE_MIN_KEEP: ${OFFSITE_MIN_KEEP:-3}
+      OFFSITE_POLL_SECONDS: ${OFFSITE_POLL_SECONDS:-60}
+    volumes:
+      - ./backups:/data:ro
+      - ./scripts/db/offsite-sync.sh:/opt/stockaccount/offsite-sync.sh:ro
     restart: unless-stopped

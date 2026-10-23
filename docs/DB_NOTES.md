@@ -238,3 +238,31 @@ Also:
 ### 8.5 Container precheck (BUG-12)
 
 `Invoke-DbSql` / `Invoke-InContainer` (docker target) call `Assert-DbContainerReady` first: the mssql container must be `running` and `healthy` (waits up to 60 s while `starting`). A stopped/missing container now fails with an actionable message instead of `OCI runtime exec failed: cannot exec in a stopped container`. `deploy.ps1` starts a stopped mssql before the pre-deploy backup and aborts the deploy if the backup fails; `rollback.ps1` starts mssql/redis before `restore.ps1`.
+
+### 8.6 Off-site copies (S3-compatible bucket)
+Full operator procedure (Turkish, incl. disaster recovery on a new server): `docs/OFFSITE_BACKUP.md`.
+
+| Script / service | Purpose | Exit codes |
+|---|---|---|
+| `offsite-sync.ps1 [-List] [-BackupDir d]` (engine: `offsite-sync.sh`, run inside the pinned `rclone/rclone:1.68.2@sha256:74c5...` container) | Uploads every complete backup (.bak whose .json exists; .bak first, manifest last), verifies size + checksum with `rclone check`, then prunes the bucket: older than `OFFSITE_RETENTION_DAYS` (default 30, 0 = never) but never the newest `OFFSITE_MIN_KEEP` (3). | 0 ok, 1 upload/verify/prune failed, 2 not configured |
+| `offsite-restore.ps1 (-List \| -File <name> \| -Latest [-Label l]) [-Target docker\|local] [-Force]` | Downloads .bak + .json into a temp sub-folder of `./backups`, checks SHA-256 + size against the manifest, then moves them next to the other backups (a failed/tampered download leaves nothing). It never touches a database: run `restore.ps1 -File` afterwards. | 0 ok, 1 failure (incl. checksum mismatch), 2 nothing found / not configured |
+| `backup.ps1 [-Offsite] [-SkipOffsite]` | After a successful local backup: with `OFFSITE_ENABLED=true` it runs offsite-sync (implicit mode: a bucket failure only warns, so deploy.ps1 / restore.ps1 safety backups are never blocked; `pre-restore` backups are not auto-uploaded). `-Offsite` (used by the scheduled task / systemd / cron) makes an upload failure exit **5** (local backup is intact). | 0 / 1 / 5 |
+| `offsite-sync` service in `docker-compose.backup.yml` | Same engine in a loop: polls `./backups` (read-only mount) every 60 s, uploads as soon as a new complete backup appears, re-verifies/prunes at least every 6 h. Idle unless `OFFSITE_ENABLED=true`. | - |
+| `register-backup-task.ps1 ... [-Offsite] [-Scheduler systemd\|cron] [-Install]` | Windows: Task Scheduler as before (+ `-Offsite`). Linux/pwsh 7: prints (or with `-Install` writes) a systemd service+timer (root) or a cron line; `-Unregister` removes it. | 0/1 |
+
+- **Settings** (only env vars / `.env`): `OFFSITE_ENABLED`, `OFFSITE_S3_ENDPOINT` (empty = AWS), `OFFSITE_S3_REGION`, `OFFSITE_S3_BUCKET`, `OFFSITE_S3_ACCESS_KEY`, `OFFSITE_S3_SECRET_KEY`, `OFFSITE_PREFIX` (default `stockaccount`), `OFFSITE_RETENTION_DAYS`, `OFFSITE_MIN_KEEP`. Optional: `OFFSITE_DOCKER_BACKUP_DIR` (host path of ./backups as the Docker daemon sees it, when the scripts themselves run in a container with the host socket), `OFFSITE_DOCKER_NETWORK`.
+- **Secrets.** The keys reach the rclone container only as `RCLONE_CONFIG_OFFSITE_*` environment variables (`docker run -e NAME`, value inherited from the script process): no rclone.conf, nothing on a command line, nothing in output (output is also masked defensively). Bucket, prefix, endpoint and numbers are regex-validated before use.
+- **Verification model.** rclone compares size and MD5 (stored by S3) of every uploaded file; restore-side verification is the manifest SHA-256, so a corrupt bucket copy can never be restored silently.
+- **Layout.** `s3://<bucket>/<prefix>/<same file names as ./backups>`. Local retention (`RetentionCount`) and bucket retention are independent.
+- **Linux/PowerShell 7.** `_common.ps1` no longer uses Windows-only paths (`'..\..'`, `$env:LOCALAPPDATA`), so backup/restore/offsite scripts run under `pwsh` on Linux.
+
+#### Drill evidence (2026-10-23/24)
+Local S3 endpoint: SeaweedFS 3.80 container with access keys enforced (the `minio/minio` images are no longer pullable from Docker Hub/quay; any S3 server works the same way for rclone).
+| Drill | Result |
+|---|---|
+| Windows PowerShell 5.1: `backup.ps1 -Target docker -Label offsitetest-1 -Offsite` on the dev stack (read-only backup) -> bucket; delete local files; `offsite-restore.ps1 -Latest -Label offsitetest`; `restore.ps1 -File ... -Force` into a **throwaway** mssql (own compose project, port 14399) | upload "verified 62 file(s) (size + checksum)", SHA-256 OK, RESTORE OK, CHECKDB clean, head + 16 tables / 424 rows = manifest |
+| Same chain under PowerShell 7.4 on Ubuntu 22.04 (`mcr.microsoft.com/powershell:7.4-ubuntu-22.04`, repo + docker socket mounted; backup of the restored throwaway -> upload -> delete -> download -> restore) | all exit 0, rows match manifest; `register-backup-task.ps1` prints a valid systemd unit/timer and cron line |
+| Negative: wrong secret key | exit 1, key never in output; missing bucket setting -> exit 2 |
+| Negative: bucket object overwritten with other content | `offsite-restore` -> "SHA-256 MISMATCH", exit 1, nothing left in ./backups |
+| Retention: two 2020 backups uploaded to the bucket, `OFFSITE_RETENTION_DAYS=30` | both (.bak + .json) removed, the 31 current ones kept |
+| Compose sidecar (`offsite-sync`, poll 10 s) | uploaded existing backups at start, and a backup created afterwards within one poll, each time "verified ... (size + checksum)" |
